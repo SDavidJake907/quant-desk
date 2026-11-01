@@ -206,13 +206,15 @@ async def main(dry: bool) -> int:
         # The plan's exits replace the profit lock; its buys and the SPY core go out from 10:00 ET.
         alerts += await plan_run.exit_pass(broker, client, [p for p in watched if p["symbol"] not in gone],
                                            book_of, orders, open_orders, session, now, dry, log, sell_position)
+        alerts += await plan_run.core_stop_pass(broker, client, positions, owner_map, orders, open_orders,
+                                                now, dry, log, gtr.POLICY)
         if session == sessions.REGULAR:
             alerts += await plan_run.buy_pass(broker, client, positions, owner_map, open_orders, now,
                                               dry, log, gtr.POLICY)
             alerts += await plan_run.buy_pass(broker, client, positions, owner_map, open_orders, now,
                                               dry, log, gtr.POLICY, strategy=SMALL)
             alerts += await plan_run.core_pass(broker, client, positions, owner_map, open_orders, now,
-                                               dry, log, gtr.POLICY)
+                                               dry, log, gtr.POLICY, orders=orders)
         if alerts and not dry:
             body = "; ".join(alerts)
             await notify.send(client, server=settings.ntfy_server, topic=settings.ntfy_topic,

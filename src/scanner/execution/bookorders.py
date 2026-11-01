@@ -66,7 +66,8 @@ async def buy_with_stop(broker, client, symbol: str, *, strategy: str, sleeve: f
                         reason: str, risk_pct: float | None = None,
                         atr_multiple: float | None = None,
                         reward_risk: float | None = None,
-                        session: str = REGULAR, loss_floor: bool = True) -> Bought:
+                        session: str = REGULAR, loss_floor: bool = True,
+                        max_loss_pct: float | None = None) -> Bought:
     """Price, size, send and log one bracket buy. Never raises on a broker or
     pricing failure; the refusal is logged and returned. `atr_multiple` and
     `reward_risk` are Gemma's menu choices; left out, the picks defaults.
@@ -88,6 +89,8 @@ async def buy_with_stop(broker, client, symbol: str, *, strategy: str, sleeve: f
         # caller sizes for the wide stop instead (Gemma's B2, 2026-10-26).
         if loss_floor:
             stop = round_tick(max(stop, profit_lock.loss_floor(limit)))
+        if max_loss_pct is not None:   # full slots (satellite.MAX_STOP_PCT)
+            stop = round_tick(max(stop, limit * (1 - max_loss_pct / 100)))
         # reward_risk is None when the picks list calls without specifying
         # (picks always uses picks_target_ceiling as its ceiling target).
         # reward_risk == 0.0 means Gemma explicitly chose "none" (ride it).

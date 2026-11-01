@@ -6,3 +6,6 @@ $action = New-ScheduledTaskAction -Execute "C:\Users\kitti\stock-scanner\scripts
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
 Register-ScheduledTask -TaskName "stock-scanner-orb" -Trigger $trigger -Action $action -Settings $settings -Description "ORB day book: every 5 min 05:46-11:56 AK weekdays, flat by the close (orb- ids)" -Force | Out-Null
 Get-ScheduledTask -TaskName "stock-scanner-orb" | Get-ScheduledTaskInfo | Select-Object TaskName, NextRunTime
+
+# Store start times as local wall time so they follow daylight-saving changes (2026-10-31).
+& "$PSScriptRoot\fix_task_times.ps1"

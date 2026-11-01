@@ -12,6 +12,8 @@ from scanner.execution.policy import TradingPolicy
 
 class FakeBroker:
     async def _get(self, path, **_):
+        if path == "/v2/calendar":
+            return [{"date": "2026-10-27"}]   # Monday -> Tuesday: not the last session before a weekend
         assert path == "/v2/account"
         return {"equity": "100000", "last_equity": "100000", "buying_power": "200000", "status": "ACTIVE"}
 

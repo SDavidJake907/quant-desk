@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from scanner.execution import bookorders, buy_queue, ownership, picks, profit_lock
+from scanner.execution import bookorders, buy_queue, flatten, ownership, picks, profit_lock
 from scanner.execution import satellite as sat
 from scanner.execution.alpaca import BrokerError, round_tick
 from scanner.execution.guards import RiskLimits, check_account
@@ -57,9 +57,31 @@ def entry_dates(orders: Iterable[Mapping[str, Any]], books: Iterable[str]) -> di
     return {s: t.astimezone(sat.ET).date() for s, t in newest.items()}
 
 
+def atr_dollars(bars) -> float:
+    """The daily ATR in dollars, as the bars measured it. Was atr_pct x the LIVE price, so the
+    stop (entry - 2.5 ATR) crept up as a stock fell -- RNG's moved 70.75 -> 71.66 in 20+ raises
+    on 10-28..30 with no gain (found 2026-10-30)."""
+    pct = atr_pct(bars) or 0.0
+    return pct / 100 * float(bars.closes[-1]) if bars.closes else 0.0
+
+
 def _buying_hours(now: datetime) -> bool:
     t = now.astimezone(sat.ET)
     return sat.may_buy_now(t) and (t.hour, t.minute) < LAST_BUY
+
+
+async def before_closure(broker, today: date, log: Log) -> bool:
+    """Whether today is the last session before a weekend-length closure: no core buy then,
+    the flatten sells the SPY core at 15:52 ET (operator 2026-10-30: "stop holding for the
+    weekend"). An unreadable calendar counts as yes -- a skipped buy risks nothing."""
+    try:
+        days = await broker._get("/v2/calendar", start=(today + timedelta(days=1)).isoformat(),
+                                 end=(today + timedelta(days=7)).isoformat())
+        nxt = date.fromisoformat(days[0]["date"]) if days else None
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"  calendar unreadable ({exc}) -- treated as the last session before a closure")
+        nxt = None
+    return flatten.closes_for_weekend(today, nxt)
 
 
 async def _reporting(broker, client, symbols: list[str], today: date) -> set[str]:
@@ -99,14 +121,15 @@ async def exit_pass(broker, client, positions, book_of: Mapping[str, str], order
         except Exception as exc:                              # noqa: BLE001
             log(f"  {s}: no daily bars ({exc}) -- its broker stop stands")
             continue
-        atr = (atr_pct(bars) or 0.0) / 100 * price
+        atr = atr_dollars(bars)
         if atr <= 0:
             log(f"  {s}: no ATR -- its broker stop stands")
             continue
         start = entered.get(s)
         after = [c for d, c in zip(bars.dates, bars.closes) if start and start < d < today]
-        hard = sat.hard_stop(entry=entry, atr=atr, high_close=max([*after, entry]),
-                             floor=not (book == SMALL or (book == GEMMA and sat.wide_stop(start))))
+        wide = book == SMALL or (book == GEMMA and sat.wide_stop(start))
+        hard = sat.hard_stop(entry=entry, atr=atr, high_close=max([*after, entry]), floor=not wide,
+                             max_loss_pct=sat.MAX_STOP_PCT if wide else None)
         why = None
         if price <= hard:
             why = (f"plan stop: {price:,.2f} at/under {hard:,.2f} "
@@ -244,15 +267,18 @@ async def buy_pass(broker, client, positions, owner_map: Mapping[str, str], open
             log(f"  WOULD BUY (queued) {s}")
             continue
         cap = 100.0 / max_positions
-        # Gemma's B2 (satellite.WIDE_STOP_FROM): the full 2.5 ATR stop, sized to a 3% stop's dollars.
+        # From satellite.FULL_SLOT_FROM: the full equal slot, the 2.5 ATR stop capped at 8%.
+        # Before it, Gemma's B2: the full 2.5 ATR stop, sized to a 3% stop's dollars.
+        full = now.astimezone(sat.ET).date() >= sat.FULL_SLOT_FROM
         result = await bookorders.buy_with_stop(
             broker, client, s, strategy=strategy, sleeve=sleeve, room=room,
             cap_pct=cap, policy=policy,
             reason=f"{label} (the plan, 10:00 ET): {plan.get('reason', '')}",
-            risk_pct=min(policy.gemma_menu_value("size", plan.get("size", "normal")), sat.same_risk_pct(cap)),
+            risk_pct=(sat.full_slot_risk_pct(cap) if full else
+                      min(policy.gemma_menu_value("size", plan.get("size", "normal")), sat.same_risk_pct(cap))),
             atr_multiple=policy.gemma_menu_value("stop", plan.get("stop", "normal")),
             reward_risk=policy.gemma_menu_value("target", plan.get("target", "none")), session=REGULAR,
-            loss_floor=False)
+            loss_floor=False, max_loss_pct=sat.MAX_STOP_PCT if full else None)
         log(f"  {'BOUGHT' if result.ok else 'NOT BOUGHT'} (queued) {s}: {result.message}")
         if result.ok:
             slots -= 1
@@ -271,9 +297,107 @@ async def buy_pass(broker, client, positions, owner_map: Mapping[str, str], open
     return alerts
 
 
+def core_stopped_on(orders: Iterable[Mapping[str, Any]]) -> date | None:
+    """ET date the core's stop last filled (status=all history), or None."""
+    fills = [str(o["filled_at"]) for o in orders
+             if o.get("side") == "sell" and o.get("filled_at")
+             and str(o.get("client_order_id") or "").startswith(sat.CORE_STOP_PREFIX)]
+    if not fills:
+        return None
+    return datetime.fromisoformat(max(fills).replace("Z", "+00:00")).astimezone(sat.ET).date()
+
+
+def core_stop_orders(open_orders: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [o for o in open_orders if o.get("side") == "sell" and o.get("type") == "stop"
+            and str(o.get("client_order_id") or "").startswith(sat.CORE_STOP_PREFIX)]
+
+
+def core_stop_payload(symbol: str, qty: int, stop: float, now: datetime) -> dict[str, Any]:
+    """GTC so it survives the close; a plain stop, it acts intraday and at a gap."""
+    return {"symbol": symbol, "qty": str(qty), "side": "sell", "type": "stop",
+            "stop_price": f"{round_tick(stop):.2f}", "time_in_force": "gtc",
+            "client_order_id": f"{sat.CORE_STOP_PREFIX}{symbol}-{int(now.timestamp())}"}
+
+
+async def core_stop_pass(broker, client, positions, owner_map: Mapping[str, str], orders, open_orders,
+                         now: datetime, dry: bool, log: Log, policy: TradingPolicy) -> list[str]:
+    """Keep one stop under every SPY core share (operator 2026-10-30): armed when missing,
+    re-sent at the new share count after a top-up, raised with the plan, never lowered."""
+    s = policy.core_symbol
+    core = next((p for p in positions if p["symbol"] == s and ownership.owner(s, owner_map) == CORE), None)
+    if core is None:
+        return []
+    qty = abs(int(float(core["qty"])))
+    entry, price = float(core["avg_entry_price"]), float(core["current_price"])
+    try:
+        bars = await fetch_bars(s, client, range_="6mo")
+    except Exception as exc:                                  # noqa: BLE001
+        log(f"  CORE STOP: no daily bars for {s} ({exc}) -- any working stop stands")
+        return []
+    atr = atr_dollars(bars)
+    if atr <= 0:
+        log(f"  CORE STOP: no ATR for {s} -- any working stop stands")
+        return []
+    start = entry_dates(orders, (CORE,)).get(s)
+    today = now.astimezone(sat.ET).date()
+    after = [c for d, c in zip(bars.dates, bars.closes) if start and start < d < today]
+    hard = round_tick(sat.hard_stop(entry=entry, atr=atr, high_close=max([*after, entry]), floor=False))
+    working = core_stop_orders(open_orders)
+    best = max((float(o["stop_price"]) for o in working if o.get("stop_price")), default=None)
+    level = hard if best is None else max(hard, best)
+    if len(working) == 1 and int(float(working[0]["qty"])) == qty:
+        if level < best + profit_lock.MIN_RAISE:
+            return []
+        if dry:
+            log(f"  WOULD RAISE core {s} stop {best:,.2f} -> {level:,.2f}")
+            return []
+        try:
+            await broker.replace_stop(str(working[0]["id"]), level)
+            log(f"  RAISED core {s} stop {best:,.2f} -> {level:,.2f} (entry {entry:,.2f})")
+            bookorders.log("core_stop_raised", s, f"stop {best:,.2f} -> {level:,.2f}", policy)
+        except BrokerError as exc:
+            log(f"  CORE STOP RAISE FAILED ({exc}) -- {best:,.2f} still stands")
+        return []
+    if price <= level:
+        # A sell stop above the market is refused; the exit it calls for is taken now
+        # (execution/protection.py's rule for a position found past its stop).
+        why = f"core {s} {price:,.2f} at/under its stop {level:,.2f} with no stop working"
+        if dry:
+            log(f"  WOULD SELL {why}")
+            return []
+        payload = {**core_stop_payload(s, qty, level, now), "type": "market", "time_in_force": "day"}
+        payload.pop("stop_price")
+        try:
+            for o in working:
+                await broker.cancel_order(str(o["id"]))
+            await broker.submit(payload)
+        except BrokerError as exc:
+            log(f"  CORE STOP SELL FAILED ({exc})")
+            return [f"SPY core has NO stop and the sell failed: {exc}"]
+        log(f"  SELL SENT {why}")
+        bookorders.log("core_stop_sold", s, why, policy)
+        return [f"Sell sent for SPY core -- {why}"]
+    why = (f"{qty} sh at {level:,.2f} ({(price - level) / price * 100:.1f}% under {price:,.2f}; "
+           f"buy {entry:,.2f}, ATR {atr:,.2f})")
+    if dry:
+        log(f"  WOULD ARM core {s} stop: {why}")
+        return []
+    try:
+        for o in working:   # wrong share count after a top-up: replace, keeping the higher level
+            await broker.cancel_order(str(o["id"]))
+        await broker.submit(core_stop_payload(s, qty, level, now))
+    except BrokerError as exc:
+        log(f"  CORE STOP FAILED ({exc})")
+        bookorders.log("core_stop_failed", s, str(exc), policy)
+        return [f"SPY core stop could not be armed: {exc}"]
+    log(f"  ARMED core {s} stop: {why}")
+    bookorders.log("core_stop_armed", s, why, policy)
+    return [f"SPY core stop armed: {why}"]
+
+
 async def core_pass(broker, client, positions, owner_map: Mapping[str, str], open_orders,
                     now: datetime, dry: bool, log: Log, policy: TradingPolicy,
-                    state_path: Path = CORE_STATE) -> list[str]:
+                    state_path: Path = CORE_STATE, orders: Iterable[Mapping[str, Any]] = ()) -> list[str]:
     if not _buying_hours(now) or policy.core_allocation_pct <= 0:
         return []
     today = now.astimezone(sat.ET).date().isoformat()
@@ -283,7 +407,9 @@ async def core_pass(broker, client, positions, owner_map: Mapping[str, str], ope
         state = {}
     if state.get("day") == today:
         return []
-    if any(ownership.strategy_of(o.get("client_order_id")) == CORE for o in open_orders):
+    # A working core BUY waits for its fill; the core's own stop is a sell and does not block.
+    if any(ownership.strategy_of(o.get("client_order_id")) == CORE and o.get("side") == "buy"
+           for o in open_orders):
         return []
     raw = await broker._get("/v2/account")
     equity = float(raw["equity"])
@@ -296,6 +422,19 @@ async def core_pass(broker, client, positions, owner_map: Mapping[str, str], ope
                               encoding="utf-8")
     if dollars <= 0:
         return []
+    if await before_closure(broker, date.fromisoformat(today), log):
+        log("  CORE BUY skipped: the weekend flatten sells the core this afternoon")
+        return []
+    stopped_on = core_stopped_on(orders)
+    if stopped_on is not None:
+        try:
+            closes = (await fetch_bars(policy.core_symbol, client, range_="6mo")).closes
+        except Exception as exc:                              # noqa: BLE001
+            log(f"  CORE BUY skipped: stopped out {stopped_on}, no bars to check a new high ({exc})")
+            return []
+        if sat.core_rebuy_blocked(stopped_on=stopped_on, today=date.fromisoformat(today), closes=closes):
+            log(f"  CORE BUY skipped: stopped out {stopped_on}; re-buy on a new 20-day closing high")
+            return []
     last, _ = await bookorders.price_and_atr(policy.core_symbol, client)
     qty = int(dollars // last)
     if qty < 1:

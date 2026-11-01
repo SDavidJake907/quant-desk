@@ -7,7 +7,8 @@ churn (round trips of minutes). Drafted with the operator, agreed by Gemma with 
 three additions (equal weight, max 2 per sector, a 10-day time stop), then three
 trend gates, one per size group (operator: "gate1 big, gate2 mid, gate3 small").
 
-  CORE       50% of the account in SPY, bought in two halves (no stop, never traded)
+  CORE       50% of the account in SPY, bought in two halves; from 2026-10-30 one GTC stop
+             under all of it (CORE_STOP_PREFIX), re-bought after a stop-out only on a new high
   SATELLITE  Gemma's 40%: 6 names, equal size (the per-name cap binds), max 2 a sector
   BUY        her group's gate open (SPY / MDY / IJR above its 200-day average), top
              third of her pool by 12-1 momentum, 6-month return up, above the 50-day,
@@ -57,6 +58,17 @@ NEW_HIGH_DAYS = 20
 #: applied. Her buys from this day keep the full 2.5 ATR stop and are sized so the dollars lost
 #: at it equal a 3% stop on a full-size position; positions bought before it keep the 3% cap.
 WIDE_STOP_FROM = date(2026, 10, 27)
+#: CORE STOP (operator 2026-10-30: "every position should have a sl"): the SPY core keeps one
+#: GTC stop for all its shares, the books' rule (hard_stop, no 3% cap): 2.5 ATR under the
+#: average buy, break-even from +1 ATR, never lowered. After it fills the core re-buys only on
+#: a new 20-day closing high within REBUY_LOOKBACK_DAYS. CHOSEN, not measured.
+CORE_STOP_PREFIX = "cor-stop-"
+#: FULL SLOTS (operator 2026-10-30, "full equal slots, stop max 8%"): sizing a buy so its wide
+#: stop lost a 3% stop's dollars left the books 14-61% invested (VSTS bought for $46). From
+#: FULL_SLOT_FROM each rules-book / small-cap buy takes its full equal slot, and its stop is
+#: 2.5 ATR under the buy but never more than MAX_STOP_PCT under it -- held positions too.
+MAX_STOP_PCT = 8.0
+FULL_SLOT_FROM = date(2026, 11, 2)
 BUY_FROM = time(10, 0)
 #: Last minutes of the session: the close-based exits are decided here.
 CLOSE_WINDOW = (time(15, 50), time(16, 0))
@@ -124,19 +136,28 @@ def wide_stop(entered: date | None) -> bool:
     return entered is not None and entered >= WIDE_STOP_FROM
 
 
+def full_slot_risk_pct(cap_pct: float) -> float:
+    """Risk per buy (% of the sleeve) that a full slot (`cap_pct`) stopped MAX_STOP_PCT under
+    the buy would lose: never binding below the slot, so the slot size decides."""
+    return cap_pct * MAX_STOP_PCT / 100
+
+
 def same_risk_pct(cap_pct: float) -> float:
     """Risk per buy (% of the sleeve) equal to a full-size position (`cap_pct` of the sleeve)
     stopped at profit_lock's 3%: wider stops then buy fewer shares, never more dollars at risk."""
     return cap_pct * profit_lock.MAX_LOSS_PCT / 100
 
 
-def hard_stop(*, entry: float, atr: float, high_close: float, floor: bool = True) -> float:
+def hard_stop(*, entry: float, atr: float, high_close: float, floor: bool = True,
+              max_loss_pct: float | None = None) -> float:
     """The broker's stop (it acts intraday and at a gap): 2.5 ATR under the buy, never
-    more than profit_lock's 3% under it unless `floor` is off (wide_stop); from +1 ATR
-    at least break-even."""
+    more than profit_lock's 3% under it unless `floor` is off (wide_stop), and never more
+    than `max_loss_pct` under it when given; from +1 ATR at least break-even."""
     stop = entry - INITIAL_ATR * atr
     if floor:
         stop = max(stop, profit_lock.loss_floor(entry))
+    if max_loss_pct is not None:
+        stop = max(stop, entry * (1 - max_loss_pct / 100))
     if high_close >= entry + BREAKEVEN_ATR * atr:
         stop = max(stop, entry)
     return stop
@@ -204,6 +225,14 @@ def core_buy_dollars(*, equity: float, core_value: float, pct: float,
     if core_value >= target * band:
         return 0.0
     return max(0.0, min(target - core_value, target / tranches))
+
+
+def core_rebuy_blocked(*, stopped_on: date | None, today: date, closes: Sequence[float]) -> bool:
+    """True while the core's stop filled within REBUY_LOOKBACK_DAYS and SPY has made no new
+    20-day closing high since -- the books' re-buy rule, so a stop-out is not bought straight back."""
+    if stopped_on is None or (today - stopped_on).days > REBUY_LOOKBACK_DAYS:
+        return False
+    return not new_closing_high(closes)
 
 
 def sector_counts(symbols: Iterable[str], sectors: Mapping[str, str]) -> dict[str, int]:

@@ -181,3 +181,6 @@ $pwSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLim
 $pwAction = New-ScheduledTaskAction -Execute "$root\scripts\scheduled_peak_watch.bat" -WorkingDirectory $root
 Register-ScheduledTask -TaskName "stock-scanner-peakwatch" -Trigger $pwTrigger -Action $pwAction -Settings $pwSettings -Description "Peak watch: READY/SELL every 5 min, 24/5 (exits when no session is open)" -Force | Out-Null
 Write-Output "registered stock-scanner-peakwatch  every 5 min, 24/5"
+
+# Store start times as local wall time so they follow daylight-saving changes (2026-10-31).
+& "$PSScriptRoot\fix_task_times.ps1"

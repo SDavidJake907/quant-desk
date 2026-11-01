@@ -88,6 +88,11 @@ def test_the_10am_buy_pass_sends_wide_stops_at_same_dollar_risk(tmp_path, monkey
             return {"equity": "100000", "last_equity": "100000", "buying_power": "200000", "status": "ACTIVE"}
 
     monkeypatch.setattr(plan_run, "_rechecks", none_skipped)
+
+    async def midweek(*a, **k):
+        return False
+
+    monkeypatch.setattr(plan_run, "before_closure", midweek)
     monkeypatch.setattr(bookorders, "buy_with_stop", fake_buy)
     monkeypatch.setattr(bookorders, "log", lambda *a, **k: None)
     now = datetime(2026, 10, 27, 10, 5, tzinfo=sat.ET)

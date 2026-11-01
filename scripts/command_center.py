@@ -14,7 +14,7 @@ Every panel says where its numbers came from. A source that is missing or
 unreadable shows as missing on the page instead of being guessed at.
 
 Panels
-  status strip   kill switch, live stops (the SPY core has none by design), daily loss vs 3%, tasks
+  status strip   kill switch, live stops (every book but Momentum; the SPY core's from 2026-10-30), daily loss vs 3%, tasks
   KPI tiles      equity, today, each book's open P/L, slots used (limits read from policy.py)
   vs the index   the account against SPY and IWM, last month (Alpaca portfolio history + daily bars)
   standings      logs/competition/standings.md as written by competition.py
@@ -61,7 +61,8 @@ BOOKS = {
     "smc": "Sweep (paused)",
 }
 #: Books held without a stop by design (policy.stopless_strategies): never flagged as naked.
-STOPLESS = {"SPY core", "Momentum"}
+#: "SPY core" removed 2026-10-30: it carries a stop now (plan_run.core_stop_pass).
+STOPLESS = {"Momentum"}
 #: Tiles shown even when the book is empty.
 MAIN_BOOKS = ("SPY core", "Rules book", "Small caps", "ORB")
 
@@ -87,6 +88,12 @@ TASKS = [
     ("peak_watch", "Peak watch: exits + 10:00 buys, every 5 min 24/5", 0.5, False, False),
     ("health", "Health check 06:00 / 14:15", 17, False, False),
     ("flatten", "Flatten before closures", 26, False, False),
+    ("preclose", "Pre-close four-sign check 15:40 ET", 26, False, False),
+    ("gemma_desk_plan", "Gemma desk plan 08:30 ET (shadow)", 26, False, False),
+    ("claude_plan", "Claude desk plan 08:45 ET (shadow)", 26, False, False),
+    ("claude_settle", "Claude desk settle 17:20 ET", 26, False, False),
+    ("gemma_desk_settle", "Gemma desk settle 17:25 ET", 26, False, False),
+    ("claude_sunday", "Claude Sunday read 18:30 ET Sun", 170, True, False),
     ("data", "Intraday bars 13:00", 26, False, False),
     ("outcomes", "Outcomes, standings, penny shadow 13:30", 26, False, False),
 ]
@@ -315,6 +322,28 @@ def read_freeze(root: Path) -> str | None:
     return None
 
 
+def desk_rows(root: Path) -> str:
+    """One table row per research desk from its book.json (read only)."""
+    rows = []
+    for name, path in (("Claude", root / "data" / "claude" / "book.json"),
+                       ("Gemma", root / "data" / "gemma_desk" / "book.json")):
+        try:
+            b = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rows.append(f"<tr><td>{name}</td><td colspan='5' class='muted'>no shadow trades played yet</td></tr>")
+            continue
+        marks = b.get("marks") or []
+        value = float(marks[-1][1]) if marks else 30000.0
+        closed = b.get("closed") or []
+        won = sum(1 for c in closed if float(c.get("exit", 0)) > float(c.get("entry", 0)))
+        held = ", ".join(p.get("symbol", "") for p in b.get("open") or []) or "-"
+        rows.append(f"<tr><td>{name}</td><td class='num'>{fnum(value, money=True)}</td>"
+                    f"<td class='num {tone(value - 30000)}'>{fnum((value / 30000 - 1) * 100, sign=True, pct=True)}</td>"
+                    f"<td class='num'>{len(closed)} ({won} won)</td><td>{esc(held)}</td><td>{esc(b.get('through') or '-')}</td></tr>")
+    return ("<div class='tablewrap'><table><thead><tr><th>Desk</th><th class='num'>Value</th><th class='num'>Return</th>"
+            "<th class='num'>Closed</th><th>Open</th><th>Through</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+
 def task_health(root: Path, now: dt.datetime) -> list[dict]:
     rows = []
     weekend = now.weekday() >= 5
@@ -512,7 +541,9 @@ def gather(root: Path, broker: Broker | None) -> dict:
     # --- standings and the penny shadow -------------------------------------------
     d["series_src"] = "Alpaca portfolio history + SPY / IWM daily bars"
     for name, p in (("standings", root / "logs" / "competition" / "standings.md"),
-                    ("penny", root / "logs" / "shadow" / "penny.md")):
+                    ("penny", root / "logs" / "shadow" / "penny.md"),
+                    ("preclose", root / "logs" / "preclose" / "latest.md"),
+                    ("sunday", root / "logs" / "claude" / "sunday.md")):
         d[name] = md_to_html(p.read_text(encoding="utf-8", errors="replace")) if p.exists() else None
         d[name + "_time"] = (
             dt.datetime.fromtimestamp(p.stat().st_mtime, tz=dt.timezone.utc).astimezone(now.tzinfo) if p.exists() else None
@@ -657,7 +688,7 @@ def render(d: dict) -> str:
         pills.append(status_pill("critical", f"No live stop: {', '.join(d['naked'])}", "protect.py arms these every 30 min in the session"))
     else:
         held = [p for p in d["positions"] if p["book"] not in STOPLESS]
-        pills.append(status_pill("good", f"Every position has a live stop ({len(held)}; SPY core none by design)"))
+        pills.append(status_pill("good", f"Every position has a live stop ({len(held)})"))
 
     # daily loss
     if "day_pc" in d:
@@ -710,6 +741,9 @@ def render(d: dict) -> str:
         comp_chart = f"<p class='muted'>No portfolio history ({esc(d['broker_error'] or 'empty')}).</p>"
     standings = d["standings"] or "<p class='muted'>logs/competition/standings.md not found — run <code>python scripts/competition.py standings</code>.</p>"
     penny = d["penny"] or "<p class='muted'>logs/shadow/penny.md not found — run <code>python scripts/penny_shadow.py</code>.</p>"
+    sunday = d["sunday"] or "<p class='muted'>No Sunday read yet — Claude writes it Sundays 18:30 ET.</p>"
+    desks = desk_rows(d["root"])
+    preclose = d["preclose"] or "<p class='muted'>No pre-close check yet — it runs 15:40 ET on session days.</p>"
 
     # ---- positions ---------------------------------------------------------------
     if d["positions"]:
@@ -781,7 +815,7 @@ def render(d: dict) -> str:
         tiles=tiles_html,
         comp_chart=comp_chart,
         comp_src=src(esc(d["series_src"])),
-        standings=standings, stand_t=esc(stand_t), penny=penny,
+        standings=standings, stand_t=esc(stand_t), penny=penny, preclose=preclose, sunday=sunday, desks=desks,
         positions=pos_html,
         pos_src=src("Alpaca paper · positions + open stop orders · book from the latest buy's client_order_id prefix"),
         tasks=trows,
@@ -956,6 +990,26 @@ TEMPLATE = """<!doctype html>
   <div class="cap">Room to stop: how far price sits above the live stop (bar full at 10%; amber under 1.5%).</div>
   {positions}
   {pos_src}
+</section>
+
+<section class="card standings">
+  <h2>Sunday read (Claude, research only)</h2>
+  {sunday}
+  <div class="src">Source: logs/claude/sunday.md</div>
+</section>
+
+<section class="card">
+  <h2>Research desks (shadow books, never trade)</h2>
+  <div class="cap">Claude and Gemma get the same brief each morning; their calls play in $30,000 paper sleeves. Judged 2026-12-31 vs SPY and the rules book (FREEZE.md pass rule).</div>
+  {desks}
+  <div class="src">Source: data/claude/book.json, data/gemma_desk/book.json</div>
+</section>
+
+<section class="card standings">
+  <h2>Pre-close check: four signs to sell</h2>
+  <div class="cap">15:40 ET. Chart (under the 50-day and the 20-day low), market (2 of 3: VIXY spike, 8+ sectors down, HYG down), a catalyst headline, MACD under its signal. Only the SPY core sells, when losing and all four confirm; the rest is reported.</div>
+  {preclose}
+  <div class="src">Source: logs/preclose/latest.md</div>
 </section>
 
 <section class="card standings">

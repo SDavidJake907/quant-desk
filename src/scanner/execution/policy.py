@@ -371,11 +371,18 @@ class TradingPolicy(Frozen):
     #: prefix claims (bought by hand in the dashboard) is never closed by any.
     #: Manual picks hold over weekends: the operator's choice, 2026-10-06.
     #: "orb" closes itself every afternoon; here only as the Friday backstop.
-    flatten_strategies: tuple[str, ...] = ("smc", "orb")
+    #: "core" added 2026-10-30 (operator: "we need to stop holding for the weekend", then
+    #: chose SPY + day trades only): the SPY core is flat over every weekend-length closure
+    #: and re-bought on the next session (plan_run.before_closure stops its buy that day).
+    #: The rules book and small caps hold over weekends behind their stops: the real trades
+    #: held 7+ days were the only ones that made money.
+    flatten_strategies: tuple[str, ...] = ("smc", "orb", "core")
     max_hold_strategies: tuple[str, ...] = ("smc",)
     #: Held without a stop by design: the momentum backtest had none (its
     #: guard is the S&P trend filter), so protect.py must not "re-arm" one.
-    stopless_strategies: tuple[str, ...] = ("momentum", "core")
+    #: "core" removed 2026-10-30 (operator: "every position should have a sl"):
+    #: peak watch keeps its stop (plan_run.core_stop_pass) and the checks now flag it naked.
+    stopless_strategies: tuple[str, ...] = ("momentum",)
 
     # --- the operator's own picks (scripts/manual_trade.py) -----------------
     #: Same 1% risk and the per-position cap as the scanner. Target defaults
@@ -517,6 +524,9 @@ class TradingPolicy(Frozen):
     #: target, never sold by a rule, no stop. Operator + Gemma: "holding does work".
     core_allocation_pct: float = 50.0
     core_symbol: str = "SPY"
+    #: Sold before the close only when losing AND all four signs confirm (execution/preclose.py,
+    #: operator 2026-10-31: strict, SPY only). Every other book is scored and reported, not sold.
+    preclose_sell_strategies: tuple[str, ...] = ("core",)
 
     # --- the small-cap book (execution/small_book.py, scripts/small_pick.py) --------
     #: Operator 2026-10-27 ("penny stocks .. low caps .. a gate for it, 10% of the account"):

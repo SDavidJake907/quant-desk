@@ -34,7 +34,7 @@ PICKS = "picks"
 GEMMA = "gemma"
 #: The opening-range breakout day book (execution/orb.py): rules, flat by the close.
 ORB = "orb"
-#: The SPY core (execution/satellite.py): half the account, held, no stop.
+#: The SPY core (execution/satellite.py): half the account, held; one GTC stop from 2026-10-30.
 CORE = "core"
 #: The small-cap book (execution/small_book.py, scripts/small_pick.py): S&P 600, 10%, from 2026-10-27.
 SMALL = "small"

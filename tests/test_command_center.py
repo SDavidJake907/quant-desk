@@ -53,7 +53,8 @@ def test_vs_index_rebases_the_account_and_each_index_to_the_first_day():
     assert "IWM" not in out                     # no close on the first day: not drawn
 
 
-def test_the_spy_core_is_never_flagged_as_naked(tmp_path):
+def test_the_spy_core_is_flagged_when_naked(tmp_path):
+    # 2026-10-30 (operator: "every position should have a sl"): the core is no longer stopless.
     fixture = {
         "/v2/account": {"equity": "100000", "last_equity": "100000", "cash": "0", "status": "ACTIVE"},
         "/v2/positions": [
@@ -71,6 +72,6 @@ def test_the_spy_core_is_never_flagged_as_naked(tmp_path):
     path.write_text(json.dumps(fixture))
     (tmp_path / "logs").mkdir()
     d = cc.gather(tmp_path, cc.Broker({}, fixture=path))
-    assert d["naked"] == ["APA"]                # APA has no stop; SPY has none by design
+    assert sorted(d["naked"]) == ["APA", "SPY"]
     page = cc.render(d)
-    assert "no stop by design" in page and "No live stop: APA" in page
+    assert "no stop by design" not in page and "No live stop: APA, SPY" in page

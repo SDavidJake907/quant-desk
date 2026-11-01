@@ -70,7 +70,7 @@ async def broker_findings(c: httpx.AsyncClient, today: date) -> tuple[list[h.Fin
     positions = await b._get("/v2/positions")
     after = (today - timedelta(days=120)).isoformat() + "T00:00:00Z"
     orders = await b._get("/v2/orders", status="all", limit=500, nested="true", after=after)
-    # Momentum and the SPY core carry no stop by design (policy.stopless_strategies),
+    # Momentum carries no stop by design (policy.stopless_strategies; the SPY core has one from 10-30),
     # as in protect.py / hub.py / desk_journal.py; flagging them daily buries a real gap.
     owner_map = ownership.owners(orders)
     stopless = TradingPolicy().stopless_strategies
