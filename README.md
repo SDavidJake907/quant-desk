@@ -1,7 +1,8 @@
 # stock-scanner
 
-Deterministic-first equity scanner and paper-trading system, with a local
-Gemma 3 analyst layer kept strictly out of the trading path.
+Deterministic-first equity scanner and paper-trading system. A local Gemma 3
+layer reads the news. It can refuse a trade, but it never finds, prices or
+sizes one.
 
 ## The core idea
 
@@ -24,13 +25,16 @@ L6  EXECUTION  Alpaca bracket orders  ->  PAPER ACCOUNT ONLY
                         NEWS PATH  (where the model lives)
 N1  INGEST     Yahoo RSS · SEC EDGAR 8-K
 N2  RESOLVE    SEC ticker->CIK entity master, company-name alias matching
-N3  FILTER     alias prefilter, then roundup detection by name count  [no AI]
-N4  GEMMA 3    news relevance + event extraction, grounded in quotes
+N3  FILTER     alias prefilter, roundup detection, embedding dedup  [no AI]
+N4  GEMMA 3    relevance, category, deal role — grounded in quotes
 ```
 
-**The two paths do not meet.** Nothing Gemma outputs reaches a screen, a
-backtest, an order or a price. See "Where Gemma actually sits" below — it
-matters more now that the project can place orders.
+**The paths meet at exactly one point, and only to subtract.** Before an order
+goes out, `trade.py` runs the news gate. If Gemma has labelled a headline as
+being about this company, material, and either `legal` or a takeover where this
+company is the **target**, the trade is refused. That is the model's only
+effect on what gets traded. It cannot add a symbol, move a level, or change a
+size. See "Where Gemma actually sits" below.
 
 ### One policy, or the evidence and the execution drift apart
 
@@ -46,13 +50,19 @@ scheduled `trade.py --submit-paper` would have traded a configuration nobody
 measured, and nothing would have errored. The backtest, meanwhile, defaulted to
 no stop floor at all — the configuration measured at −0.121R after costs.
 
-All three now read their defaults from `TradingPolicy`, and a test fails if any
-of them drifts. The policy is hashed onto every audit record, so a result can
-always be traced to the rules that produced it.
+All three now take interval, k, reward:risk, stop floor and freshness from
+`TradingPolicy`. `tests/test_policy.py` pins the policy's validated values, so
+a changed default fails a test. The policy is hashed onto every audit record,
+so a result can always be traced to the rules that produced it.
+
+**One rule is not yet wired through:** the value-area sweep. `trade.py` always
+requires it. `smc_backtest.py` and `find_setups.py` only apply it when you pass
+`--value-sweep`, so a bare run of either measures the raw pattern, not the
+validated one.
 
 ### Three rules that keep it honest
 
-1. **The LLM never emits a number.** Its output schema has no numeric fields.
+1. **The LLM never emits a number.** Its output schemas have no numeric fields.
    Prices and percentages are rendered from data, never from the model.
 2. **No citation, no claim.** Every model verdict must quote a span that
    verbatim occurs in the source text — *and* that says something. Verbatim
@@ -74,16 +84,22 @@ Copy-Item .env.example .env      # then set SCANNER_SEC_USER_AGENT to your email
 
 SEC requires a contact string in the User-Agent or it returns 403.
 
-Gemma 3 runs through Ollama (news triage only — not needed to trade):
+Gemma 3 runs through Ollama. It is used for news triage, for the news gate in
+`trade.py`, and for the advisory ranking:
 
 ```powershell
 ollama pull gemma3:12b
 ollama pull nomic-embed-text
 ```
 
-Gemma is configured with Ollama `keep_alive=-1`, so it remains loaded between
-news-review calls. Set `SCANNER_LLM_KEEP_ALIVE=5m` in `.env` if you need Ollama
-to release its memory when idle.
+`SCANNER_LLM_KEEP_ALIVE` defaults to `45m`: long enough that the model stays
+warm across the 30-minute scan cadence, short enough that it releases its
+memory once scanning stops. Set `-1` to pin it, or `5m` to release sooner.
+
+**If Ollama is down, the news gate fails open.** A news outage is deliberately
+non-fatal, so with no model every candidate passes the gate — including the
+takeover targets it exists to refuse. `scripts/start_all.ps1` checks for this
+after a reboot. See "Running unattended".
 
 Alpaca handles execution. Create an account, generate **paper** keys from the
 dashboard, and put them in `.env`:
@@ -97,38 +113,88 @@ Paper keys and live keys are different credentials, and this project only ever
 talks to the paper endpoint. Trading US stocks through the API is commission
 free with no account minimum; the free market-data tier is IEX-only, which is
 fine for order routing and wrong for volume profiles — price research here
-stays on Yahoo's consolidated bars.
+stays on Yahoo's consolidated bars. The ex-dividend gate also reads Alpaca's
+corporate-actions feed, so `trade.py` and `brief.py` want the keys even in a
+dry run.
+
+Other settings, all optional:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SCANNER_SESSION_START_EQUITY` | `0` | Baseline for the daily-loss guard. Left at 0, the guard measures from current equity and **cannot fire**. |
+| `SCANNER_AUDIT_LOG_PATH` | `logs/trading_audit.jsonl` | Append-only record of every intent, refusal and order. |
+| `SCANNER_KILL_SWITCH_PATH` | `STOP_TRADING` | If this file exists, `trade.py` refuses to submit. |
+| `SCANNER_TRIAGE_MODEL` | `gemma3:12b` | Model for triage and ranking. |
 
 ## Usage
 
+**Daily screens and research**
+
 ```powershell
-python scripts/global_board.py                      # world indices, by region
+python scripts/global_board.py                      # world indices, by region, open/closed
 python scripts/find_candidates.py --show 15         # trend screen over S&P 500
 python scripts/find_candidates.py --near-miss       # 5-of-6 names too
 python scripts/backtest.py --screen all --range 5y  # incl. random control
 python scripts/backtest.py --no-point-in-time       # measure survivorship bias
 python scripts/dashboard.py                         # S&P 1500 heatmap -> HTML
-python scripts/find_setups.py --value-sweep         # live intraday setup scan
-python scripts/smc_backtest.py --index sp500        # does that setup work?
-python scripts/smc_backtest.py --index sp500 --minutes 30 --value-sweep --min-risk-pct 1.5 --holdout 0.333  # chronological holdout
-python scripts/smc_backtest.py --index sp500 --minutes 240 --value-sweep --holdout 0.333 --trend-context --rsi-context --macd-context  # 4H context research
-python scripts/collect_intraday.py                  # grow 30m history (daily)
-python scripts/check_alpaca.py                     # read-only paper connection check
-python scripts/trade.py                            # scan + size, send nothing (default)
-python scripts/trade.py --submit-paper             # explicitly submit paper orders
-python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-only jobs
-python scripts/trade.py --minutes 240 --trend-context --rsi-context --macd-context --dry-run  # 4H filtered paper preview
-python scripts/run_scan.py NVDA AAPL                # news triage via Gemma 3
+python scripts/sectors.py                           # money flow and leaders by sector
+python scripts/sectors.py --setups                  # only sectors with live setups
 python scripts/income.py --min-yield 2.5 --min-streak 5   # income sleeve screen
-python scripts/bench_llm.py                         # is a bigger model worth it?
 python scripts/brief.py AMD NVDA                    # everything known about a symbol
+python scripts/report.py                            # every measurement -> report.html
+```
+
+**The intraday setup**
+
+```powershell
+python scripts/find_setups.py --value-sweep         # live scan, validated config
+python scripts/smc_backtest.py --index sp500        # RAW pattern (no value sweep)
+python scripts/smc_backtest.py --index sp500 --value-sweep --holdout 0.333  # validated config, chronological holdout
+python scripts/smc_backtest.py --index sp500 --minutes 240 --value-sweep --holdout 0.333 --trend-context --rsi-context --macd-context  # 4H context research
+python scripts/collect_intraday.py                  # grow 30m history (run daily)
+```
+
+**Single-idea tests** (each uses the same train/holdout protocol)
+
+```powershell
 python scripts/test_divergence.py                   # RSI divergence at the sweep
+python scripts/divergence_cases.py                  # draw the cases where it disagrees
 python scripts/test_bearish_exit.py                 # bearish divergence as an exit
 python scripts/test_tp_ladder.py                    # scale-out vs holding to target
 python scripts/test_accumulation.py                 # rising OBV as a filter
-powershell -File scripts/register_tasks.ps1         # market-hours scheduler
+python scripts/test_preearnings.py                  # run-up into earnings, exit before
+```
+
+**News and the model**
+
+```powershell
+python scripts/run_scan.py NVDA AAPL                # news funnel, stage by stage
+python scripts/bench_llm.py                         # is a bigger model worth it?
+```
+
+**Paper trading**
+
+```powershell
+python scripts/check_alpaca.py                      # read-only connection check
+python scripts/trade.py                             # scan + size, send nothing (default)
+python scripts/trade.py --submit-paper              # submit paper bracket orders
 python scripts/trade.py --swing-allocation 66.7 --swing-cap 66000  # two sleeves
-python -m pytest -q                                 # 449 tests
+python scripts/positions.py                         # intents joined to broker fills, R, fill rate
+python scripts/positions.py --history               # + equity curve
+python scripts/monitor.py --interval 60             # read-only safety checks, repeating
+python scripts/protect.py                           # find positions with no live stop
+python scripts/protect.py --submit                  # re-arm them with OCO orders
+python scripts/manage_positions.py                  # positions past the 60-bar limit
+python scripts/manage_positions.py --execute        # close them
+python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-only jobs
+```
+
+**Scheduling (Windows)**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1   # market-hours scan + data
+powershell -ExecutionPolicy Bypass -File scripts/start_all.ps1        # post-reboot health check
+python -m pytest -q                                                   # 466 tests
 ```
 
 Price bars cache to `data/` keyed by symbol, **range and interval**, so re-runs
@@ -156,8 +222,8 @@ more than reading the winner:
 | RSI > 60 momentum | 39 | +0.193R | no help |
 | RSI 40-65 pullback | 65 | +0.294R | shadow-logged |
 | coiled + volume dry-up | 26 | +0.288R | sample too small |
-| RS top half | 42 | +0.448R | shadow-logged |
-| RS top quartile | 29 | +0.439R | shadow-logged |
+| RS top half | 42 | +0.448R | not used live |
+| RS top quartile | 29 | +0.439R | not used live |
 | liquidity-scaled stop floor | 167 | +0.172R | rejected |
 | skip the 09:30-10:30 open | 21 | +1.269R | shadow-logged |
 | skip Wednesday | 48 | +0.775R | shadow-logged |
@@ -195,11 +261,16 @@ chance is expected rather than surprising, and several of the winners rest on
 mechanism** — 86 days is about twelve Wednesdays, and it contradicts the
 standard claim that Wednesday is the best trend day.
 
-So `TradeIntent` now records the RSI gate, the session slot and the weekday on
-every setup **without filtering on any of them**. In three months the paper
-record answers these questions on data nothing was chosen from. The flags
-`--skip-open` and `--skip-weekday` exist for anyone who wants them, off by
-default, labelled NOT VALIDATED.
+So every `TradeIntent` records whether the RSI gate passed, the session slot,
+the weekday, the liquidity tier, the sector and Gemma's opinion — **without
+filtering on any of them**. In three months the paper record answers these
+questions on data nothing was chosen from. The flags `--skip-open` and
+`--skip-weekday` exist for anyone who wants them, off by default, labelled NOT
+VALIDATED.
+
+Relative strength is not recorded per trade yet. `priority()` can take an RS
+percentile, but `trade.py` does not pass one, so live ranking uses stop width
+and reward:risk only.
 
 The two adopted changes are the two that remove known risk rather than add a
 signal: gap-aware fills, and the earnings gate.
@@ -242,16 +313,16 @@ defaults.
 
 ### 4H context research filters
 
-The current SMC detector remains the control. The following filters are
-opt-in until their holdout results are known:
+The unfiltered 30-minute SMC detector is the control and the default
+everywhere. These filters are opt-in on `trade.py`, `find_setups.py` and
+`smc_backtest.py` until their holdout results are known:
 
 - `--trend-context`: price above EMA21 > EMA50 > EMA200, with a positive EMA50 slope.
 - `--rsi-context`: RSI14 in the preferred 40-65 pullback range.
 - `--macd-context`: MACD above its signal line with a positive histogram.
 
-These are confirmation gates, not independent buy signals. The paper trader
-now defaults to 4H bars, but the new gates must be explicitly enabled while
-their results are compared against the unfiltered SMC and random controls.
+They are confirmation gates, not independent buy signals. Pair them with
+`--minutes 240` to test the 4-hour variant.
 
 ## The universe
 
@@ -420,7 +491,7 @@ real low, both wrong, and would invent swing pivots months later), and a
 re-fetch overwrites what it overlaps, so running it five times a day equals
 running it once.
 
-## Four ideas tested against the holdout, four rejected
+## Five ideas tested against the holdout, five rejected
 
 Each was measured with the same protocol: chronological split, choose on train
 only, look at the holdout once, and report the RETENTION RATE beside the mean —
@@ -440,6 +511,8 @@ half of bullish divergence. Only the RSI half was missing.
 
 The effect flips sign between halves. Read the holdout alone and it looks like a
 clean win at t +2.34 keeping 57% of trades; the train half says the opposite.
+`scripts/divergence_cases.py` draws the strongest disagreements as charts, for
+anyone who wants to check by eye.
 
 ### Bearish divergence as an exit — consistently worse
 
@@ -490,6 +563,20 @@ From the morning report's "accumulation: rising OBV while basing".
 The control row is the tell: on train, setups WITHOUT accumulation did exactly
 as well. The holdout gap of 0.277R is smaller than either standard error.
 
+### Pre-earnings run-up — market drift, not an earnings effect
+
+A different trade from the swing setup: enter N trading days before an earnings
+report, exit 4-5 days before it, so the position never carries the release.
+Earnings dates come from SEC 8-K item 2.02 filings, the actual announcement
+date as filed, reaching back about eight years. The control is the same holding
+period on random dates in the same names.
+
+In the last recorded run (enter 20 days out, exit 5 days out), the edge over
+random averaged +0.32% across 21 quarters, t = +0.69, positive in 14 of 21.
+The per-trade figures look far stronger because they count the same earnings
+season hundreds of times; one observation per quarter is what is actually
+independent. Not distinguishable from drift.
+
 **What did not move through any of this:** the setup itself, +0.545R on train
 and +0.443R on holdout in the same run. Every attempt to improve it failed
 while the core kept surviving fresh splits.
@@ -527,6 +614,9 @@ a `--swing-cap` holds the strategy at a fixed size and lets everything above it
 fall to income — which is what "reinvest profits into dividends" actually
 requires. Expressed as a percentage, that intention silently does nothing.
 
+`income.py` ranks; nothing in this repo buys for the income sleeve. Those
+holdings are bought by hand.
+
 ## The ex-dividend gate — a correction, not a filter
 
 On the ex-dividend morning the exchange reduces the opening price by the
@@ -546,8 +636,9 @@ real gap between what was measured and what will happen.
 Every other context gate tested here was rejected for claiming that some
 condition *predicts* better outcomes — seven of nine made the holdout worse.
 This one claims nothing about the future, so it is enforced rather than
-shadow-logged. It touches maybe 1-2% of trades (ex-dates are four days a year
-per name) and removes a small, known, one-directional loss.
+shadow-logged: a setup is refused when the declared drop would consume more
+than a third of its stop. It touches maybe 1-2% of trades (ex-dates are four
+days a year per name) and removes a small, known, one-directional loss.
 
 ### What Alpaca's corporate-actions feed does and does not give you
 
@@ -572,7 +663,7 @@ Assembles what the system already computes and then discards a line at a time:
 trend (20/50/200 EMA with distance), momentum (RSI daily and intraday, ATR%),
 relative strength, sector, liquidity against the floors, the setup with its
 entry/stop/target/RR and freshness, position size, earnings and ex-dividend
-risk, dividend record, and Gemma's read on the news.
+risk, dividend record, and the news gate's verdict.
 
 **What it deliberately omits:** probability estimates, T1/T2 target ladders,
 analyst grades, implied volatility, fundamentals. Not because they would not
@@ -622,77 +713,77 @@ Payout ratio is deliberately absent: it needs earnings data this project does
 not carry, and a payout ratio computed from a bad EPS figure is worse than none
 because it looks authoritative.
 
-## Running unattended
-
-    powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1
-    powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1 -Remove
-
-Two Windows tasks:
-
-    stock-scanner-scan   05:33-12:03 AK, every 30 min   scan + paper orders
-    stock-scanner-data   13:00 AK daily                 grow 30m bar history
-
-05:30 Alaska is 09:30 Eastern, and both zones observe DST together, so the
-4-hour offset holds year-round with no seasonal correction.
-
-**Offset by three minutes on purpose.** Bars close on the hour and the half
-hour. A task firing at :00 races the data provider to finalise the bar it
-needs, and a run at exactly 05:30 reads YESTERDAY's bars because the session's
-first bar does not close until 06:00.
-
-Three things that went wrong building this, all worth knowing:
-
-- **`schtasks.exe` silently ignores `/ET` on a MINUTE schedule.** It reports
-  SUCCESS and creates a task repeating every 30 minutes FOREVER, firing all
-  night. The only evidence is `Repeat: Until: Duration: Disabled` in the
-  verbose query. The PowerShell cmdlets set a real duration.
-- **Working directory.** Config paths are relative, so a task launched from
-  System32 writes its audit log where nobody looks — and the scan appears to
-  work while recording nothing. Hence the `.bat` wrappers.
-- **`MultipleInstances IgnoreNew`.** A slow scan must never have a second copy
-  start on top of it: two runs could each read the account before the other
-  ordered, and size two positions against the same free sleeve capital.
-
-### It evaluates when the market is shut
-
-A refusal to trade is a reason not to send an order, not a reason to stop
-looking. Most material news — earnings, mergers, guidance — lands when the
-market is closed, so reading it while nothing can be traded is when reading is
-free. Any failed gate now downgrades to evaluation-only rather than returning.
-
-That needed a second fix to be worth anything: `fresh_bars` counts BARS, and no
-bars print overnight, so "the last 2 bars" means the last 2 bars of yesterday
-forever. An overnight scan would have reported zero setups every half hour and
-looked like a quiet market rather than a stopped clock. Outside market hours
-the window widens to one session (13 bars at 30m).
-
-Those are a WATCH list, never trade candidates. The measured entry is the close
-of the trigger bar; entering the same setup at tomorrow's open is a different
-trade at a different price with a stop that may already be broken.
-
 ## Execution (paper only)
 
 `scripts/trade.py` turns setups into bracket orders on an Alpaca **paper**
 account. It defaults to scan-only mode. `--submit-paper` is required to send
-orders, and there is no `--live` flag.
+orders, and there is no `--live` flag. One run does this, in order:
 
-### Watchdog
+1. **Kill switch.** If `STOP_TRADING` exists in the project root, refuse to
+   submit anything.
+2. **Cancel stale entries.** Unfilled buy orders older than the freshness
+   window (2 bars × 30 minutes) are cancelled. Protective sell legs are never
+   touched.
+3. **Find naked positions.** Any open position whose shares are not all
+   covered by a live stop or limit sell is printed in red and written to the
+   audit log, with the command to fix it. This runs before scanning for
+   anything new.
+4. **Split the account into sleeves**, and check the account gate: market
+   open, account active, equity above the floor, under the position limit,
+   under the daily-loss limit. If any check fails, the run continues in
+   **evaluation-only** mode and sends nothing.
+5. **Scan** the universe for setups whose trigger bar is within the last 2
+   bars and still live. Skip names under $5 or $5M daily dollar volume.
+6. **Rank** by `priority()`. Gemma's ranking is computed and recorded beside
+   it, not acted on.
+7. **Confirm** each candidate, refusing on: already held, order already
+   working, position limit full, size not tradeable, ex-dividend erosion,
+   earnings inside 7 days, legal news, or takeover target.
+8. **Submit** one GTC bracket per survivor and log the intent and the
+   broker's response.
 
-The watchdog can restart crashed collectors and scan-only jobs with bounded
-exponential backoff. It records starts, crashes, restarts, and final status in
-`logs/watchdog.jsonl`. It refuses `--submit-paper` and `--live`; an uncertain
-broker response must be reconciled against Alpaca before restarting.
+Refusals that will expire — earnings next week, position limit full — go to
+`data/watchlist.json` with the date they become eligible again. Permanent ones,
+like a takeover target, are dropped. A watch-listed setup is never re-priced;
+if it is still valid, the scanner has to find it again.
 
-Three things it gets right that an unattended trader must:
+### What the orders guarantee, and what they do not
 
-- **Bracket orders.** Entry, stop and target go as one unit, so the position
-  is never alive without a stop behind it — not even in the window where the
-  process could die.
+- **Bracket orders.** Entry, stop and target go as one unit, so the broker
+  holds the stop from the moment the entry fills.
+- **GTC, not DAY.** This was a live bug. `day` applies to the protective legs
+  too, so every stop and target cancelled at the close, and three positions
+  worth $58,701 sat with no stop through a weekend and a full Monday session.
+  Nothing errored. Brackets are now GTC, `trade.py` checks for naked positions
+  on every run, and `scripts/protect.py --submit` re-arms them with OCO orders
+  at the levels in the audit log.
 - **Idempotent order ids** derived from the symbol and the trigger bar, not
   the clock. A restart, a retry, or two scans of the same bar cannot open the
   same trade twice.
-- **Guards that refuse rather than adjust**: market closed, equity floor,
-  daily loss limit, max concurrent positions, already-held, already-ordered.
+- **Guards that refuse rather than adjust.** A blocked order is reported and
+  skipped, never quietly resized.
+- **The 60-bar time limit is not automatic.** The backtest closed every trade
+  after 60 bars; a bracket has no such limit. `scripts/manage_positions.py
+  --execute` closes positions past it, but nothing schedules that script.
+- **The daily-loss guard needs a baseline.** `trade.py` compares current equity
+  to `SCANNER_SESSION_START_EQUITY`. Unset, it compares equity to itself and
+  never trips. `monitor.py` does use Alpaca's prior-close equity, but it only
+  reports; stopping trading means creating `STOP_TRADING` yourself.
+
+### Watching it
+
+- `scripts/positions.py` joins the audit log to the broker's order history on
+  `client_order_id`: what was intended, what filled, what closed at stop or
+  target, realized R, and fill rate. It reads protection from the broker, not
+  from the log. Read-only.
+- `scripts/monitor.py` runs deterministic safety checks — kill switch, account
+  status, equity floor, daily loss, position count, positions or orders with no
+  audit intent, positions missing live stop and target legs — and exits 2 on
+  any critical finding. Read-only.
+- `scripts/watchdog.py` restarts crashed collectors and scan-only jobs with
+  bounded exponential backoff, logging to `logs/watchdog.jsonl`. It refuses
+  `--submit-paper` and `--live`: a process that may have reached the broker
+  must be reconciled before it is restarted.
 
 ### Why 1% risk is really 0.33%, and why raising it does nothing
 
@@ -740,9 +831,73 @@ about 1.4 trading days. Forcing a same-day exit costs two-thirds of the edge:
 | 2 days (26 bars) | +0.198R | 14.8 |
 | ~4.6 days (60 bars) | +0.206R | 18.7 |
 
-Positions carry overnight. Gap risk is real and is **not** modelled anywhere
-in the backtest — stops are assumed to fill at the stop price, and gaps are
-exactly where they do not.
+Positions carry overnight, which is why the GTC fix above matters. The backtest
+models gaps by default: a bar that opens through the stop fills at the open,
+not the stop price. `gap_fills=False` in `scanner.backtest.setups` restores the
+old, flattering assumption. Live gaps are still real, and the backtest only
+saw one market regime's worth of them.
+
+## Running unattended
+
+    powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1
+    powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1 -Remove
+
+Two Windows tasks:
+
+    stock-scanner-scan   05:33-12:03 AK, every 30 min   trade.py --submit-paper
+    stock-scanner-data   13:00 AK daily                 collect_intraday.py --index all
+
+Both run through `.bat` wrappers and append to `logs/scheduled.log`.
+
+05:30 Alaska is 09:30 Eastern, and both zones observe DST together, so the
+4-hour offset holds year-round with no seasonal correction.
+
+**Offset by three minutes on purpose.** Bars close on the hour and the half
+hour. A task firing at :00 races the data provider to finalise the bar it
+needs, and a run at exactly 05:30 reads YESTERDAY's bars because the session's
+first bar does not close until 06:00.
+
+Three things that went wrong building this, all worth knowing:
+
+- **`schtasks.exe` silently ignores `/ET` on a MINUTE schedule.** It reports
+  SUCCESS and creates a task repeating every 30 minutes FOREVER, firing all
+  night. The only evidence is `Repeat: Until: Duration: Disabled` in the
+  verbose query. The PowerShell cmdlets set a real duration.
+- **Working directory.** Config paths are relative, so a task launched from
+  System32 writes its audit log where nobody looks — and the scan appears to
+  work while recording nothing. Hence the `.bat` wrappers.
+- **`MultipleInstances IgnoreNew`.** A slow scan must never have a second copy
+  start on top of it: two runs could each read the account before the other
+  ordered, and size two positions against the same free sleeve capital.
+
+### After a reboot
+
+    powershell -ExecutionPolicy Bypass -File scripts/start_all.ps1
+
+The scheduled tasks survive a restart; Ollama does not. With Ollama down the
+news gate passes everything, so the scanner keeps trading and looks normal
+while one of its safety checks is gone. `start_all.ps1` starts Ollama if it can,
+then checks the API, that `gemma3:12b` is present, both tasks, `.env`, the kill
+switch and the broker connection, and exits 1 on any problem. If the model is
+missing, fix it or create `STOP_TRADING`.
+
+### It evaluates when the market is shut
+
+A refusal to trade is a reason not to send an order, not a reason to stop
+looking. Most material news — earnings, mergers, guidance — lands when the
+market is closed, so reading it while nothing can be traded is when reading is
+free. Any failed account gate downgrades to evaluation-only rather than
+returning.
+
+That needed a second fix to be worth anything: `fresh_bars` counts BARS, and no
+bars print overnight, so "the last 2 bars" means the last 2 bars of yesterday
+forever. An overnight scan would have reported zero setups every half hour and
+looked like a quiet market rather than a stopped clock. Outside market hours
+the window widens to one session (13 bars at 30m).
+
+Those are a WATCH list, never trade candidates. The measured entry is the close
+of the trigger bar; entering the same setup at tomorrow's open is a different
+trade at a different price with a stop that may already be broken.
 
 ## Model size is not the constraint
 
@@ -764,15 +919,16 @@ here at 3.04 GB/s: a 70B model at 4-bit is ~11.5 s/token, or 7.7 minutes for
 one 40-token JSON reply, against a scan that runs every 30 minutes. It also
 solves a problem this machine does not have — 14.6 GB of VRAM free, not 4.
 
-Ollama's `keep_alive` defaults to `45m`, not `-1`. Forever pinned 8.7 GB of RAM
-and 9.6 GB of VRAM around the clock for a model used seconds per half hour;
-45m outlives the scan cadence so it never reloads mid-session, then releases.
+`keep_alive` is `45m`, not `-1`. Forever pinned 8.7 GB of RAM and 9.6 GB of
+VRAM around the clock for a model used seconds per half hour; 45m outlives the
+scan cadence so it never reloads mid-session, then releases.
 
 ## The model layer is not measured yet
 
 The screens have a backtest, a random control and a clustered t-statistic. The
 Gemma 3 layer has none of that — it is judged by reading its output, which is
-how the trend screen's edge went unquestioned for so long.
+how the trend screen's edge went unquestioned for so long. That matters more
+now that its triage labels can veto a trade.
 
 What live runs on 2026-08-05 showed, before the filters above existed: a
 four-company listicle and a market wrap both passed as material subject news
@@ -796,7 +952,7 @@ before any number from an LLM backtest means anything.
 ```
 SCAN     the deterministic detector finds a setup        [no AI]
 WATCH    it is ranked against its peers by priority()    [no AI, + Gemma advisory]
-CONFIRM  gates run: liquidity, news, earnings, risk, duplicates
+CONFIRM  gates run: held, working, limits, size, ex-div, earnings, news
 TRADE    a bracket order goes to the paper broker
 ```
 
@@ -804,7 +960,8 @@ Every candidate reaches exactly one final stage and records why it stopped.
 Refusals are data: "the screen found 40 setups and refused 38, here is the
 breakdown by rule" tells you far more than two orders and silence — in
 particular it tells you whether a quiet day was a quiet market or a rule that
-has quietly stopped letting anything through.
+has quietly stopped letting anything through. Each run prints that breakdown
+at the end.
 
 `TradingPolicy` holds every rule in one frozen, hashed object written beside
 each decision. Six months from now the only question that matters about a
@@ -814,10 +971,11 @@ different fingerprints is a change in policy, not in the market.
 
 **Ranking used to be an accident.** Candidates were sorted by trigger time —
 most recent first — which is not a ranking. `priority()` now scores them on
-stop width (the strongest finding in the study), reward:risk capped so a tight
-stop cannot buy the top slot with a huge ratio, and relative-strength
-percentile as a light touch. Crude and readable on purpose: nothing about it
-was fitted, and it is deterministic so it stays testable.
+stop width (the strongest finding in the study) and reward:risk, capped so a
+tight stop cannot buy the top slot with a huge ratio. It can also take a
+relative-strength percentile, which `trade.py` does not currently pass. Crude
+and readable on purpose: nothing about it was fitted, and it is deterministic
+so it stays testable.
 
 **What the lifecycle deliberately does not add is a confirmation delay.**
 Entry is still the close of the trigger bar, because that is what the holdout
@@ -827,49 +985,62 @@ evidence.
 
 ## Where Gemma actually sits
 
-Worth stating plainly now that the project can place orders: **the language
-model has nothing to do with any trading decision.**
+Gemma 3 has three jobs, all textual, none numeric.
 
-Gemma 3 has two jobs, both textual, neither numeric:
-
-1. **News triage** — is this article really *about* this company, and is it
-   material? Only `subject` + material survives.
-2. **Ranking candidates by context** — of the setups that already passed every
+1. **News triage** (`llm/triage.py`). For each headline that survived the
+   free filters: what role does this company play (`subject`, `supplier`,
+   `customer`, `competitor`, `example`, `unrelated`), is it material, what
+   category is it, and is this company a takeover `target`, the `acquirer`, or
+   neither. Only `subject` + material survives.
+2. **The news gate** (`execution/news_gate.py`). Python reads the surviving
+   triage labels and refuses the trade if any is `legal` or names the company
+   as a takeover **target**. Earnings inside the holding period are refused
+   too, but that comes from the calendar, not the model. This is the one place
+   the model changes what trades, and it can only remove a candidate.
+3. **Advisory ranking** (`llm/ranking.py`). Of the setups that passed every
    deterministic test, does any have news that makes its price structure
-   unreliable? It answers `strong` / `neutral` / `weak` with a named concern
-   and a quote it must be able to evidence.
+   unreliable? It answers `strong` / `neutral` / `weak`, names what is driving
+   the stock (`company`, `sector`, `market`), and must quote its evidence. It
+   is told whether each company's sector is leading or lagging the market,
+   which is computed from bars, not asked of it.
 
 The split is by competence: **price is arithmetic, context is language.**
 Finding a setup is swing pivots and breaks — a model does that worse,
-differently each run, and untestably. Choosing between five setups that have
-already passed is partly a reading task, and that part is its own.
+differently each run, and untestably. Noticing that a company is being bought
+is a reading task.
 
-It never sees prices (a model shown prices starts doing arithmetic badly
-instead of reading), its schema has no numeric field, and an opinion it cannot
-quote falls back to neutral so it cannot bury a candidate on a hunch.
-
-**Its ranking is recorded, not obeyed.** Acting on it would make the strategy
+**The ranking is recorded, not obeyed.** Acting on it would make the strategy
 unbacktestable — different answer each run, and the model already knows how
 these stories ended. The +0.218R holdout is the only real evidence here and it
 depends on determinism. So both orderings go into the audit log and get
 compared after a few hundred paper trades. If Gemma's `strong` calls have
 outperformed its `weak` ones by then, promoting it is a measured decision.
 
+**The gate is obeyed, and that is a trade-off worth naming.** The holdout was
+measured without it. Refusing takeover targets is a correction in the same
+spirit as the ex-dividend gate — a stock tracking an exchange ratio is not
+trading on its own structure — but it does mean live results include a model
+judgement the backtest never saw.
+
 It does not choose symbols, set entries, set stops, set targets, size
-positions, or place orders. Those are arithmetic over price bars, and they are arithmetic on
-purpose: the same bars always produce the same answer, which is what makes the
-backtest meaningful and the orders auditable.
+positions, or place orders. Those are arithmetic over price bars, on purpose:
+the same bars always produce the same answer, which is what makes the backtest
+meaningful and the orders auditable.
 
 Three structural guarantees keep it that way:
 
-- **Its output schema has no numeric fields.** Gemma cannot emit a price even
+- **Its output schemas have no numeric fields.** Gemma cannot emit a price even
   if asked. Every number on screen is rendered from bars.
-- **It runs in a different pipeline.** `scripts/run_scan.py` uses it;
-  `find_setups.py`, `smc_backtest.py`, `dashboard.py` and `trade.py` never
-  import it. If Ollama is not running, everything except news triage is
-  unaffected.
+- **The price path never imports it.** `find_setups.py`, `smc_backtest.py`,
+  `backtest.py` and `dashboard.py` run without Ollama. `trade.py` calls it only
+  after setups are found, ranked and sized.
 - **Verdicts need a grounded, substantive citation** or they are dropped —
-  copying the headline back does not count.
+  copying the headline back does not count. An ungrounded ranking opinion
+  falls back to neutral.
+
+What it costs when it is missing: if Ollama is down, triage returns nothing,
+the gate approves everything, and ranking returns neutral. Trading continues.
+See "After a reboot".
 
 If the model layer ever earns a bigger role, it will be because a labelled
 eval set measured it, not because it seemed to be doing well.
@@ -896,21 +1067,28 @@ threshold chosen by looking at those same trades.
 - [x] Paper execution through Alpaca (bracket orders, risk sizing, guards)
 - [x] Out-of-sample holdout split — chronological, floor re-chosen on train
       only; edge survives at +0.247R over 43 holdout trades
-- [ ] Gap-fill modelling: stops are assumed to fill AT the stop price, and
-      overnight gaps are exactly where they do not
+- [x] Gap-fill modelling — a bar opening through the stop fills at the open
+- [x] GTC brackets, stale-entry cancellation, naked-position detection and
+      `protect.py` re-arming
 - [x] Sleeve accounting — income and swing sized independently, positions
       attributed by `client_order_id`, dollar cap so profit can flow to income
 - [x] Ex-dividend calendar and stop-erosion gate (a correction to
       dividend-adjusted backtest bars, not a predictive filter)
 - [x] Income screen ranked on payment record rather than yield
 - [x] One policy object feeding every entry point, pinned by a test
+- [ ] Wire `require_value_sweep` through to `smc_backtest.py` and
+      `find_setups.py`, so a bare run tests the validated configuration
+- [ ] Schedule `manage_positions.py --execute`, so the 60-bar exit the
+      backtest assumed actually happens
+- [ ] Set the daily-loss baseline automatically from Alpaca's prior-close
+      equity, as `monitor.py` already does
 - [ ] **Verify the paper account actually credits dividends.** The `DIV`
       activity endpoint works and is empty; until a payer is held through an
       ex-date, the income sleeve is untested. This gates the rest of it.
 - [ ] Write outcomes back to the audit log. It records what was decided and
       never what happened; realized R is recomputed on demand from Alpaca's
-      order history, which is not permanent. Eight shadow dimensions are
-      unredeemable without it.
+      order history, which is not permanent. The shadow-logged dimensions and
+      the Gemma ranking cannot be scored without it.
 - [ ] Retrace entry as a backtest variant — enter on a return to the order
       block rather than at the trigger-bar close. Train split first, holdout
       once. The only untested idea likely to move the number.
@@ -922,10 +1100,10 @@ threshold chosen by looking at those same trades.
 - [ ] Daily P&L reconciliation
 - [ ] Gemma 3 reads full 8-K text, not just SEC item codes
 - [x] Roundup detector for multi-company headlines
-- [x] Web dashboard (L5) — sector-grouped relative-strength heatmap
+- [x] Web dashboard — sector-grouped relative-strength heatmap
 - [ ] Run the backtest over the full 1500 rather than the 500 (all three change
-      logs now pass the drift audit; small caps make the missing transaction-cost
-      model bite much harder, so cost modelling should land first)
+      logs now pass the drift audit; small caps make costs bite much harder)
 - [ ] Labelled eval set for the triage layer (role + materiality), so prompt
-      and model changes can be measured instead of eyeballed
+      and model changes can be measured instead of eyeballed — more urgent now
+      that triage can veto trades
 - [ ] Parquet/DuckDB storage replacing the JSON cache
