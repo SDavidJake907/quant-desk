@@ -85,6 +85,20 @@ def check_account(
     return ALLOWED
 
 
+def session_baseline(configured: float, last_equity: float, equity: float) -> float:
+    """The equity the daily-loss guard measures today's drawdown from.
+
+    An explicit setting wins. Otherwise the broker's previous-close equity,
+    which is what "today" means for a daily limit. Only if neither exists does
+    it fall back to current equity — and then the guard cannot fire, because
+    a drawdown measured from where you are now is always zero.
+    """
+    for candidate in (configured, last_equity):
+        if candidate and candidate > 0:
+            return candidate
+    return equity
+
+
 def check_symbol(
     symbol: str,
     held: frozenset[str],

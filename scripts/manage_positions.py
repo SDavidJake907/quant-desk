@@ -27,9 +27,9 @@ from datetime import datetime
 
 import httpx
 
-from scanner.backtest.setups import DEFAULT_MAX_BARS
 from scanner.config import settings
 from scanner.execution.alpaca import Alpaca, BrokerError
+from scanner.execution.policy import TradingPolicy
 from scanner.features.intraday import fetch_intraday, max_range
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
@@ -55,6 +55,13 @@ async def main(max_bars: int, minutes: int, execute: bool) -> None:
         broker = Alpaca(settings.alpaca_key_id, settings.alpaca_secret_key, client)
         positions = await broker._get("/v2/positions")
         orders = await broker._get("/v2/orders", status="open", nested="true")
+
+        # A market close sent while the market is shut queues for the next
+        # open and fills wherever it gaps to. The scheduled run fires every
+        # half hour of the session, so waiting costs at most 30 minutes.
+        if execute and not await broker.market_open():
+            print(f"{YELLOW}market is closed — reporting only{RESET}")
+            execute = False
 
         if not execute:
             print(f"{YELLOW}report only — nothing will be closed or cancelled{RESET}")
@@ -108,7 +115,7 @@ async def main(max_bars: int, minutes: int, execute: bool) -> None:
 
         for symbol in stale_positions:
             try:
-                await broker.close_position(symbol)
+                await broker.close_position_and_legs(symbol)
                 print(f"  {GREEN}closed{RESET} {symbol}")
             except BrokerError as exc:
                 print(f"  {RED}could not close {symbol}: {exc}{RESET}")
@@ -122,8 +129,9 @@ async def main(max_bars: int, minutes: int, execute: bool) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--max-bars", type=int, default=DEFAULT_MAX_BARS)
-    p.add_argument("--minutes", type=int, default=30)
+    policy = TradingPolicy()
+    p.add_argument("--max-bars", type=int, default=policy.max_hold_bars)
+    p.add_argument("--minutes", type=int, default=policy.interval_minutes)
     p.add_argument("--execute", action="store_true",
                    help="actually close and cancel; default reports only")
     a = p.parse_args()

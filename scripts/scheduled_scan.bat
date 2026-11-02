@@ -14,5 +14,11 @@ set LOG=logs\scheduled.log
 echo. >> "%LOG%"
 echo ===== %DATE% %TIME% ===== >> "%LOG%"
 
+REM Time exit first. The backtest closed every trade after 60 bars, and a
+REM bracket has no such limit, so without this a position rides indefinitely
+REM on evidence that assumed it would not. Running it before trade.py also
+REM frees the slot for this run. Its failure must not stop the scan.
+".venv\Scripts\python.exe" "scripts\manage_positions.py" --execute >> "%LOG%" 2>&1
+
 ".venv\Scripts\python.exe" "scripts\trade.py" --submit-paper >> "%LOG%" 2>&1
 exit /b %errorlevel%

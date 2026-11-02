@@ -35,7 +35,9 @@ import httpx
 from scanner.config import settings
 from scanner.execution.alpaca import Alpaca, BrokerError, bracket_payload
 from scanner.execution.audit import append_event
-from scanner.execution.guards import RiskLimits, check_account, check_symbol
+from scanner.execution.guards import (
+    RiskLimits, check_account, check_symbol, session_baseline,
+)
 from scanner.execution.policy import CONFIRM, SCAN, TRADE, WATCH, Decision, TradingPolicy, rejections
 from scanner.execution.news_gate import check as check_news
 from scanner.execution.safety import kill_switch_active
@@ -202,7 +204,9 @@ async def main(
                       f"no new entries until they close{RESET}")
 
             gate = check_account(
-                account.equity, settings.session_start_equity or account.equity,
+                account.equity,
+                session_baseline(settings.session_start_equity,
+                                 account.last_equity, account.equity),
                 len(held), limits, market_open=open_market,
                 account_status=account.status, account_blocked=account.blocked,
             )

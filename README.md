@@ -50,15 +50,16 @@ scheduled `trade.py --submit-paper` would have traded a configuration nobody
 measured, and nothing would have errored. The backtest, meanwhile, defaulted to
 no stop floor at all — the configuration measured at −0.121R after costs.
 
-All three now take interval, k, reward:risk, stop floor and freshness from
-`TradingPolicy`. `tests/test_policy.py` pins the policy's validated values, so
-a changed default fails a test. The policy is hashed onto every audit record,
-so a result can always be traced to the rules that produced it.
+All three now take interval, k, reward:risk, stop floor, freshness and the
+value-area sweep from `TradingPolicy`. `tests/test_policy.py` pins the
+policy's validated values and checks that the research scripts read them, so a
+changed default fails a test. The policy is hashed onto every audit record, so
+a result can always be traced to the rules that produced it.
 
-**One rule is not yet wired through:** the value-area sweep. `trade.py` always
-requires it. `smc_backtest.py` and `find_setups.py` only apply it when you pass
-`--value-sweep`, so a bare run of either measures the raw pattern, not the
-validated one.
+The value-area sweep was the last rule to be wired through. Until it was, a
+bare `smc_backtest.py` or `find_setups.py` run measured the raw pattern while
+`trade.py` traded the filtered one. Pass `--no-value-sweep` to see the raw
+pattern on purpose.
 
 ### Three rules that keep it honest
 
@@ -121,7 +122,7 @@ Other settings, all optional:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SCANNER_SESSION_START_EQUITY` | `0` | Baseline for the daily-loss guard. Left at 0, the guard measures from current equity and **cannot fire**. |
+| `SCANNER_SESSION_START_EQUITY` | `0` | Baseline for the daily-loss guard. Left at 0, Alpaca's previous-close equity is used. |
 | `SCANNER_AUDIT_LOG_PATH` | `logs/trading_audit.jsonl` | Append-only record of every intent, refusal and order. |
 | `SCANNER_KILL_SWITCH_PATH` | `STOP_TRADING` | If this file exists, `trade.py` refuses to submit. |
 | `SCANNER_TRIAGE_MODEL` | `gemma3:12b` | Model for triage and ranking. |
@@ -147,10 +148,11 @@ python scripts/report.py                            # every measurement -> repor
 **The intraday setup**
 
 ```powershell
-python scripts/find_setups.py --value-sweep         # live scan, validated config
-python scripts/smc_backtest.py --index sp500        # RAW pattern (no value sweep)
-python scripts/smc_backtest.py --index sp500 --value-sweep --holdout 0.333  # validated config, chronological holdout
-python scripts/smc_backtest.py --index sp500 --minutes 240 --value-sweep --holdout 0.333 --trend-context --rsi-context --macd-context  # 4H context research
+python scripts/find_setups.py                       # live scan, validated config
+python scripts/smc_backtest.py --index sp500        # does that setup work?
+python scripts/smc_backtest.py --index sp500 --holdout 0.333  # chronological holdout
+python scripts/smc_backtest.py --index sp500 --no-value-sweep # the raw pattern, for comparison
+python scripts/smc_backtest.py --index sp500 --minutes 240 --holdout 0.333 --trend-context --rsi-context --macd-context  # 4H context research
 python scripts/collect_intraday.py                  # grow 30m history (run daily)
 ```
 
@@ -185,7 +187,7 @@ python scripts/monitor.py --interval 60             # read-only safety checks, r
 python scripts/protect.py                           # find positions with no live stop
 python scripts/protect.py --submit                  # re-arm them with OCO orders
 python scripts/manage_positions.py                  # positions past the 60-bar limit
-python scripts/manage_positions.py --execute        # close them
+python scripts/manage_positions.py --execute        # close them (scheduled before every scan)
 python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-only jobs
 ```
 
@@ -194,7 +196,7 @@ python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1   # market-hours scan + data
 powershell -ExecutionPolicy Bypass -File scripts/start_all.ps1        # post-reboot health check
-python -m pytest -q                                                   # 466 tests
+python -m pytest -q                                                   # 478 tests
 ```
 
 Price bars cache to `data/` keyed by symbol, **range and interval**, so re-runs
@@ -762,13 +764,17 @@ if it is still valid, the scanner has to find it again.
   same trade twice.
 - **Guards that refuse rather than adjust.** A blocked order is reported and
   skipped, never quietly resized.
-- **The 60-bar time limit is not automatic.** The backtest closed every trade
-  after 60 bars; a bracket has no such limit. `scripts/manage_positions.py
-  --execute` closes positions past it, but nothing schedules that script.
-- **The daily-loss guard needs a baseline.** `trade.py` compares current equity
-  to `SCANNER_SESSION_START_EQUITY`. Unset, it compares equity to itself and
-  never trips. `monitor.py` does use Alpaca's prior-close equity, but it only
-  reports; stopping trading means creating `STOP_TRADING` yourself.
+- **The 60-bar time limit.** The backtest closed every trade after 60 bars; a
+  bracket has no such limit. `scripts/manage_positions.py --execute` runs
+  before every scheduled scan and closes positions past it. It cancels the
+  bracket's stop and target first, because Alpaca will not close shares those
+  orders are holding, then closes at market. If the close fails after the
+  cancel, it says the position may have no stop, and `trade.py` flags it as
+  naked on its next run. With the market shut it only reports.
+- **The daily-loss guard.** `trade.py` measures today's drawdown from
+  `SCANNER_SESSION_START_EQUITY` if set, otherwise from Alpaca's
+  previous-close equity. A 3% drop halts new entries for the day; existing
+  brackets keep running.
 
 ### Watching it
 
@@ -844,7 +850,8 @@ saw one market regime's worth of them.
 
 Two Windows tasks:
 
-    stock-scanner-scan   05:33-12:03 AK, every 30 min   trade.py --submit-paper
+    stock-scanner-scan   05:33-12:03 AK, every 30 min   manage_positions.py --execute,
+                                                        then trade.py --submit-paper
     stock-scanner-data   13:00 AK daily                 collect_intraday.py --index all
 
 Both run through `.bat` wrappers and append to `logs/scheduled.log`.
@@ -1076,12 +1083,11 @@ threshold chosen by looking at those same trades.
       dividend-adjusted backtest bars, not a predictive filter)
 - [x] Income screen ranked on payment record rather than yield
 - [x] One policy object feeding every entry point, pinned by a test
-- [ ] Wire `require_value_sweep` through to `smc_backtest.py` and
+- [x] `require_value_sweep` wired through to `smc_backtest.py` and
       `find_setups.py`, so a bare run tests the validated configuration
-- [ ] Schedule `manage_positions.py --execute`, so the 60-bar exit the
-      backtest assumed actually happens
-- [ ] Set the daily-loss baseline automatically from Alpaca's prior-close
-      equity, as `monitor.py` already does
+- [x] `manage_positions.py --execute` scheduled before every scan, cancelling
+      bracket legs before it closes, so the 60-bar exit actually happens
+- [x] Daily-loss baseline taken from Alpaca's previous-close equity
 - [ ] **Verify the paper account actually credits dividends.** The `DIV`
       activity endpoint works and is empty; until a payer is held through an
       ex-date, the income sleeve is untested. This gates the rest of it.

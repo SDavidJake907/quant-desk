@@ -308,3 +308,77 @@ def test_trade_py_reconciles_protection_before_it_scans():
         "protection is reconciled after new positions are sized — a naked "
         "position should be found before the scanner looks for more"
     )
+
+
+# ---- account baseline and time exits ----------------------------------------
+
+def _broker(handler) -> Alpaca:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return Alpaca("key", "secret", client)
+
+
+async def test_account_reads_the_previous_close():
+    def handler(request):
+        return httpx.Response(200, json={
+            "equity": "96000", "cash": "1000", "buying_power": "2000",
+            "last_equity": "100000", "status": "ACTIVE",
+        })
+    account = await _broker(handler).account()
+    assert account.last_equity == 100_000.0
+
+
+async def test_closing_cancels_the_bracket_legs_first():
+    """Open legs reserve the shares, and Alpaca refuses the close until
+    they are gone. The cancel has to happen first, and the close only once
+    nothing is still open."""
+    calls: list[str] = []
+    open_orders = [{"id": "stop-1", "symbol": "MU", "side": "sell"},
+                   {"id": "other", "symbol": "AMD", "side": "sell"}]
+
+    def handler(request):
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            return httpx.Response(200, json=open_orders)
+        if request.url.path == "/v2/orders/stop-1":
+            open_orders[:] = [o for o in open_orders if o["id"] != "stop-1"]
+        return httpx.Response(204)
+
+    await _broker(handler).close_position_and_legs("MU", poll_s=0)
+    deletes = [c for c in calls if c.startswith("DELETE")]
+    assert deletes == ["DELETE /v2/orders/stop-1", "DELETE /v2/positions/MU"]
+
+
+async def test_close_is_not_attempted_while_legs_are_still_open():
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"id": "stop-1", "symbol": "MU"}])
+        return httpx.Response(204)          # cancel accepted, never completes
+
+    with pytest.raises(BrokerError, match="NOT closed"):
+        await _broker(handler).close_position_and_legs(
+            "MU", wait_s=0.02, poll_s=0.01)
+    assert "DELETE /v2/positions/MU" not in calls
+
+
+async def test_a_failed_close_after_cancelling_says_the_stop_is_gone():
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(403, text="insufficient qty available")
+
+    with pytest.raises(BrokerError, match="NO STOP"):
+        await _broker(handler).close_position_and_legs("MU", poll_s=0)
+
+
+def test_the_time_exit_is_scheduled_before_the_scan():
+    """The backtest closed every trade at 60 bars. Unscheduled, that exit
+    never happened and live positions rode on untested terms."""
+    from pathlib import Path
+    bat = Path("scripts/scheduled_scan.bat").read_text(encoding="utf-8")
+    assert "manage_positions.py\" --execute" in bat
+    assert bat.index('"scripts\\manage_positions.py"') < bat.index('"scripts\\trade.py"')
+    script = Path("scripts/manage_positions.py").read_text(encoding="utf-8")
+    assert "close_position_and_legs(" in script

@@ -212,8 +212,11 @@ if __name__ == "__main__":
     p.add_argument("--min-rr", type=float, default=VALIDATED.min_reward_risk)
     p.add_argument("--min-risk-pct", type=float, default=VALIDATED.min_risk_pct,
                    help="skip stops tighter than this %% of price; costs eat them")
-    p.add_argument("--value-sweep", action="store_true",
-                   help="require the sweep to leave and reclaim the value area")
+    p.add_argument("--value-sweep", action=argparse.BooleanOptionalAction,
+                   default=VALIDATED.require_value_sweep,
+                   help="require the sweep to leave and reclaim the value area "
+                        "(on by default, as validated; --no-value-sweep for the "
+                        "raw pattern)")
     p.add_argument("--trend-context", action="store_true",
                    help="require bullish EMA21/50/200 alignment")
     p.add_argument("--rsi-context", action="store_true",

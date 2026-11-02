@@ -46,6 +46,9 @@ class Account(Frozen):
     equity: float
     cash: float
     buying_power: float
+    #: Equity at the previous close, as Alpaca reports it. The daily-loss
+    #: guard's baseline: without it the guard compares equity to itself.
+    last_equity: float = 0.0
     status: str = "ACTIVE"
     blocked: bool = False
 
@@ -260,8 +263,54 @@ class Alpaca:
             raise BrokerError(f"DELETE {path} failed: {exc}") from exc
 
     async def close_position(self, symbol: str) -> None:
-        """Close at market. Used only for the backtest's time limit."""
+        """Close at market. Fails while open orders hold the shares — use
+        `close_position_and_legs` for anything opened by a bracket."""
         await self._delete(f"/v2/positions/{symbol}")
+
+    async def open_orders_for(self, symbol: str) -> list[dict[str, Any]]:
+        return [
+            o for o in await self._get("/v2/orders", status="open", nested="true")
+            if o.get("symbol") == symbol
+        ]
+
+    async def close_position_and_legs(
+        self, symbol: str, *, wait_s: float = 10.0, poll_s: float = 0.5
+    ) -> None:
+        """Cancel the symbol's working orders, then close the position.
+
+        WHY THE CANCEL COMES FIRST
+        A filled bracket leaves its stop and target working, and those legs
+        reserve the shares. Alpaca then refuses to close the position with
+        "insufficient qty available", so a time exit sent straight to
+        `close_position` fails on exactly the positions it exists for.
+
+        Cancels are asynchronous, so this waits until no order for the symbol
+        is still open before closing. If the close still fails, the position
+        has just lost its stop — the error says so, and `trade.py` will flag
+        it as naked on its next run.
+        """
+        import asyncio
+
+        for order in await self.open_orders_for(symbol):
+            await self.cancel_order(str(order.get("id", "")))
+
+        waited = 0.0
+        while await self.open_orders_for(symbol):
+            if waited >= wait_s:
+                raise BrokerError(
+                    f"{symbol}: orders still open after {wait_s:.0f}s of "
+                    "cancelling; position NOT closed and may have no stop"
+                )
+            await asyncio.sleep(poll_s)
+            waited += poll_s
+
+        try:
+            await self.close_position(symbol)
+        except BrokerError as exc:
+            raise BrokerError(
+                f"{symbol}: protective orders were cancelled but the close "
+                f"failed — position may have NO STOP: {exc}"
+            ) from exc
 
     async def cancel_order(self, order_id: str) -> None:
         await self._delete(f"/v2/orders/{order_id}")
@@ -272,6 +321,7 @@ class Alpaca:
             equity=float(raw.get("equity") or 0.0),
             cash=float(raw.get("cash") or 0.0),
             buying_power=float(raw.get("buying_power") or 0.0),
+            last_equity=float(raw.get("last_equity") or 0.0),
             status=str(raw.get("status") or "UNKNOWN"),
             blocked=bool(
                 raw.get("trading_blocked")

@@ -74,7 +74,7 @@ async def collect(symbols: tuple[str, ...], minutes: int, range_: str):
 async def main(
     symbols: tuple[str, ...], ks: tuple[int, ...], minutes: int, range_: str | None,
     max_bars: int, min_rr: float, min_risk_pct: float, lookback: int,
-    control_draws: int, value_sweep: bool = False, holdout_fraction: float | None = None,
+    control_draws: int, value_sweep: bool = True, holdout_fraction: float | None = None,
     require_trend_context: bool = False, require_rsi_context: bool = False,
     require_macd_context: bool = False,
 ) -> None:
@@ -159,7 +159,11 @@ if __name__ == "__main__":
     p.add_argument("--max-bars", type=int, default=DEFAULT_MAX_BARS)
     p.add_argument("--min-rr", type=float, default=VALIDATED.min_reward_risk)
     p.add_argument("--min-risk-pct", type=float, default=VALIDATED.min_risk_pct)
-    p.add_argument("--value-sweep", action="store_true")
+    p.add_argument("--value-sweep", action=argparse.BooleanOptionalAction,
+                   default=VALIDATED.require_value_sweep,
+                   help="require the sweep to leave and reclaim the value area "
+                        "(on by default, as validated; --no-value-sweep tests "
+                        "the raw pattern)")
     p.add_argument("--lookback", type=int, default=60)
     p.add_argument("--control-draws", type=int, default=5)
     p.add_argument("--holdout", type=float, default=None, metavar="FRACTION",

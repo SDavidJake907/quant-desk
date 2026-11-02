@@ -87,3 +87,37 @@ def test_an_untouched_symbol_is_allowed():
 def test_verdicts_are_usable_as_booleans():
     assert bool(check_symbol("MU", frozenset(), frozenset())) is True
     assert bool(check_symbol("MU", frozenset({"MU"}), frozenset())) is False
+
+
+# ---- daily-loss baseline -------------------------------------------------
+
+def test_baseline_prefers_the_explicit_setting():
+    from scanner.execution.guards import session_baseline
+    assert session_baseline(90_000.0, 95_000.0, 88_000.0) == 90_000.0
+
+
+def test_baseline_falls_back_to_the_previous_close():
+    """Unset, the guard used to compare equity to itself and never fire."""
+    from scanner.execution.guards import session_baseline
+    assert session_baseline(0.0, 100_000.0, 96_000.0) == 100_000.0
+
+
+def test_a_four_percent_drop_from_the_close_now_halts_trading():
+    from scanner.execution.guards import session_baseline
+    start = session_baseline(0.0, 100_000.0, 96_000.0)
+    verdict = check_account(96_000.0, start, 0, LIMITS)
+    assert not verdict and "down 4.00%" in verdict.reason
+
+
+def test_baseline_with_nothing_known_is_current_equity():
+    from scanner.execution.guards import session_baseline
+    assert session_baseline(0.0, 0.0, 50_000.0) == 50_000.0
+
+
+def test_trade_py_uses_the_baseline():
+    """Pins the call site: reverting to `session_start_equity or equity`
+    silently disables the guard again."""
+    from pathlib import Path
+    source = Path("scripts/trade.py").read_text(encoding="utf-8")
+    assert "session_baseline(" in source
+    assert "settings.session_start_equity or account.equity" not in source

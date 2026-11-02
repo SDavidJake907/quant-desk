@@ -126,3 +126,21 @@ def test_every_entry_point_defaults_to_the_validated_configuration():
                 f"{name}.py {flag} defaults to {default!r}, not the policy — "
                 f"evidence and execution can drift apart"
             )
+
+
+def test_research_entry_points_default_to_the_validated_sweep():
+    """`--value-sweep` was opt-in on the backtest and the live scan, so a
+    bare run measured the raw pattern while trade.py traded the filtered
+    one. Both now take the default from the policy."""
+    from pathlib import Path
+    for name in ("scripts/smc_backtest.py", "scripts/find_setups.py"):
+        source = Path(name).read_text(encoding="utf-8")
+        assert "default=VALIDATED.require_value_sweep" in source, name
+        assert '"--value-sweep", action="store_true"' not in source, name
+
+
+def test_the_time_exit_reads_its_limit_from_the_policy():
+    from pathlib import Path
+    source = Path("scripts/manage_positions.py").read_text(encoding="utf-8")
+    assert "policy.max_hold_bars" in source
+    assert "policy.interval_minutes" in source
