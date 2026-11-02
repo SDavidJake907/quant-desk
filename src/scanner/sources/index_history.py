@@ -49,7 +49,7 @@ WHAT THIS DOES NOT FIX
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -103,13 +103,21 @@ class IndexSpec(Frozen):
     #: assumed: a fixed-size index whose reconstructed membership drifts has a
     #: log with holes in it. See MEMBERSHIP_DRIFT_TOLERANCE.
     point_in_time: bool = True
+    #: Where the change log lives, when it is not on `page`. In October 2026
+    #: Wikipedia moved the S&P 500's log to its own article; the 400 and 600
+    #: logs are still on their list pages. Both documents are fetched and
+    #: cached together, so the parser sees one text either way.
+    changes_page: str = ""
 
     @property
     def cache_path(self) -> Path:
         return CACHE_DIR / f"{self.key}_wikitext.txt"
 
 
-SP500 = IndexSpec(key="sp500", label="S&P 500", page="List of S&P 500 companies")
+SP500 = IndexSpec(
+    key="sp500", label="S&P 500", page="List of S&P 500 companies",
+    changes_page="Historical components of the S&P 500",
+)
 SP400 = IndexSpec(
     key="sp400", label="S&P MidCap 400", page="List of S&P 400 companies"
 )
@@ -396,15 +404,30 @@ def parse_api_payload(payload: dict) -> str:
     return text
 
 
+#: How long a cached membership document is trusted. Index changes are
+#: announced days ahead and take effect on a known date, so a day-old copy is
+#: at most one change behind. A copy that never expires is not: it silently
+#: freezes the universe at whatever day it was first downloaded.
+CACHE_MAX_AGE = timedelta(days=1)
+
+
 async def fetch_wikitext(
     client: httpx.AsyncClient, spec: IndexSpec = SP500
 ) -> str:
+    """The list page, plus the change-log page when it lives separately."""
+    text = await fetch_page(client, spec.page)
+    if spec.changes_page:
+        text = f"{text}\n\n{await fetch_page(client, spec.changes_page)}"
+    return text
+
+
+async def fetch_page(client: httpx.AsyncClient, page: str) -> str:
     try:
         response = await client.get(
             WIKI_API,
             params={
                 "action": "parse",
-                "page": spec.page,
+                "page": page,
                 "prop": "wikitext",
                 "format": "json",
                 "formatversion": "2",
@@ -429,11 +452,31 @@ async def load(
     parser changes, old caches stay usable and the reconstruction stays
     auditable against what Wikipedia actually said.
     """
-    if not refresh and spec.cache_path.exists():
-        return build(spec.cache_path.read_text(encoding="utf-8"), spec=spec)
+    cached = spec.cache_path
+    if not refresh and cached.exists() and not is_stale(cached):
+        return build(cached.read_text(encoding="utf-8"), spec=spec)
 
-    wikitext = await fetch_wikitext(client, spec)
-    history = build(wikitext, spec=spec)  # parse before caching; never cache garbage
-    spec.cache_path.parent.mkdir(parents=True, exist_ok=True)
-    spec.cache_path.write_text(wikitext, encoding="utf-8")
+    try:
+        wikitext = await fetch_wikitext(client, spec)
+        history = build(wikitext, spec=spec)  # parse before caching; never cache garbage
+    except IndexHistoryError as exc:
+        # A stale universe is better than none: one Wikipedia outage or page
+        # edit must not stop the scanner. But it is said out loud, because a
+        # universe that quietly stops updating is how this cache went wrong.
+        if not cached.exists():
+            raise
+        print(f"  ! {spec.label}: refresh failed ({exc}); using cached copy "
+              f"from {_cache_date(cached)}")
+        return build(cached.read_text(encoding="utf-8"), spec=spec)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_text(wikitext, encoding="utf-8")
     return history
+
+
+def is_stale(path: Path, now: datetime | None = None) -> bool:
+    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - modified > CACHE_MAX_AGE
+
+
+def _cache_date(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")

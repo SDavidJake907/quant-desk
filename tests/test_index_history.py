@@ -343,3 +343,75 @@ def test_a_double_pipe_cell_does_not_keep_a_stray_pipe():
 
 def test_ordinary_single_pipe_rows_still_split_normally():
     assert clean_cell("Industrials") == "Industrials"
+
+
+# ---- where the documents come from, and how long a copy is trusted ----------
+
+def test_the_sp500_change_log_is_read_from_its_own_article():
+    """Wikipedia moved it off the list page in October 2026; without this the
+    S&P 500 failed to load and only the 400 and 600 were scanned."""
+    from scanner.sources.index_history import SP400, SP500, SP600
+    assert SP500.changes_page == "Historical components of the S&P 500"
+    assert not SP400.changes_page and not SP600.changes_page
+
+
+async def test_both_pages_are_fetched_and_joined(monkeypatch):
+    from scanner.sources import index_history as ih
+    seen = []
+
+    async def fake(client, page):
+        seen.append(page)
+        return f"<{page}>"
+    monkeypatch.setattr(ih, "fetch_page", fake)
+    text = await ih.fetch_wikitext(None, ih.SP500)
+    assert seen == [ih.SP500.page, ih.SP500.changes_page]
+    assert ih.SP500.page in text and ih.SP500.changes_page in text
+
+
+def test_a_day_old_cache_is_stale(tmp_path):
+    import os
+    import time
+    from scanner.sources.index_history import is_stale
+    path = tmp_path / "x.txt"
+    path.write_text("x")
+    assert not is_stale(path)
+    old = time.time() - 2 * 86_400
+    os.utime(path, (old, old))
+    assert is_stale(path)
+
+
+async def test_a_failed_refresh_falls_back_to_the_cached_copy(tmp_path, monkeypatch, capsys):
+    import os
+    import time
+    from scanner.sources import index_history as ih
+
+    good = await _good_source(ih)
+    spec = ih.SP400.model_copy(update={"key": "t"})
+    monkeypatch.setattr(ih, "CACHE_DIR", tmp_path)
+    spec.cache_path.write_text(good, encoding="utf-8")
+    old = time.time() - 2 * 86_400
+    os.utime(spec.cache_path, (old, old))
+
+    async def broken(client, s):
+        raise ih.IndexHistoryError("wikipedia moved the table")
+    monkeypatch.setattr(ih, "fetch_wikitext", broken)
+
+    history = await ih.load(None, spec=spec)
+    assert history.members
+    assert "using cached copy" in capsys.readouterr().out
+
+
+async def test_a_failed_refresh_with_no_cache_still_raises(tmp_path, monkeypatch):
+    from scanner.sources import index_history as ih
+    spec = ih.SP400.model_copy(update={"key": "none"})
+    monkeypatch.setattr(ih, "CACHE_DIR", tmp_path)
+
+    async def broken(client, s):
+        raise ih.IndexHistoryError("down")
+    monkeypatch.setattr(ih, "fetch_wikitext", broken)
+    with pytest.raises(ih.IndexHistoryError):
+        await ih.load(None, spec=spec)
+
+
+async def _good_source(ih) -> str:
+    return WIKITEXT
