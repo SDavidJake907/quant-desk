@@ -165,6 +165,7 @@ python scripts/test_bearish_exit.py                 # bearish divergence as an e
 python scripts/test_tp_ladder.py                    # scale-out vs holding to target
 python scripts/test_accumulation.py                 # rising OBV as a filter
 python scripts/test_preearnings.py                  # run-up into earnings, exit before
+python scripts/test_pead.py --index sp500           # drift after a strong earnings reaction
 ```
 
 **News and the model**
@@ -196,7 +197,7 @@ python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1   # market-hours scan + data
 powershell -ExecutionPolicy Bypass -File scripts/start_all.ps1        # post-reboot health check
-python -m pytest -q                                                   # 478 tests
+python -m pytest -q                                                   # 493 tests
 ```
 
 Price bars cache to `data/` keyed by symbol, **range and interval**, so re-runs
@@ -330,7 +331,11 @@ They are confirmation gates, not independent buy signals. Pair them with
 
 The S&P 500, MidCap 400 and SmallCap 600 pages share a table layout, so one
 parser covers all three: **1,504 unique companies, every one with a GICS
-sector**. Fetching them costs about 40 seconds once a day, then nothing —
+sector**. The cached copies in `data/` expire after a day, so membership
+follows real index changes; if a refresh fails, the stale copy is used and
+the run says so. In October 2026 Wikipedia moved the S&P 500's change log to
+its own article, "Historical components of the S&P 500", so that index reads
+two pages. Fetching them costs about 40 seconds once a day, then nothing —
 Yahoo's throttle turned out to be nowhere near where the old comment claimed.
 1,503 of the 1,504 have usable price history.
 
@@ -493,7 +498,7 @@ real low, both wrong, and would invent swing pivots months later), and a
 re-fetch overwrites what it overlaps, so running it five times a day equals
 running it once.
 
-## Five ideas tested against the holdout, five rejected
+## Six ideas tested against the holdout, six rejected
 
 Each was measured with the same protocol: chronological split, choose on train
 only, look at the holdout once, and report the RETENTION RATE beside the mean —
@@ -578,6 +583,39 @@ random averaged +0.32% across 21 quarters, t = +0.69, positive in 14 of 21.
 The per-trade figures look far stronger because they count the same earnings
 season hundreds of times; one observation per quarter is what is actually
 independent. Not distinguishable from drift.
+
+### Post-earnings drift — no effect in either index
+
+The best-known anomaly in academic finance: after a strong earnings
+reaction, the stock keeps drifting the same way for weeks. Tested as a
+long-only strategy. With no analyst estimates to measure surprise, the
+market's own reaction stands in for it: the stock's move against the index
+from two days before the 8-K filing to the day after. A reaction in the top
+fifth, set on training quarters only, is bought at that close and held 5 to
+60 days.
+
+The control is the one that matters: the same-size move on a random
+**non-earnings** day in the same stocks. Without it, "stocks that just jumped
+keep going" cannot be told apart from ordinary momentum.
+
+    HOLDOUT, hold chosen on train        vs index after 20bps    vs ordinary-day jumps
+    S&P 500       (14 quarters, 5d)      -0.01%   t -0.05        -0.09%   t -0.33
+    SmallCap 600  (14 quarters, 10d)     -0.71%   t -1.84        +0.01%   t +0.01
+
+No hold length in either index beat ordinary-day jumps with t above 1 on the
+holdout. Two details worth more than the verdict:
+
+- **Big earnings jumps did no better than big ordinary-day jumps.** Wherever
+  the top fifth drifted up at long holds, the non-earnings control drifted up
+  as much or more. That is momentum, not an earnings effect.
+- **The bottom fifth drifted UP in training** (+2.02% at 60 days on the 500,
+  t +3.85), the opposite of the theory. Survivorship bias is the likely
+  reason: only today's members are tested, so companies whose bad reports
+  were followed by worse ones and an exit from the index are missing.
+
+The literature puts most of this effect in small, thinly followed stocks
+and finds it has faded since it was published. Neither index here is small
+enough, and the last eight years show no trace of it.
 
 **What did not move through any of this:** the setup itself, +0.545R on train
 and +0.443R on holdout in the same run. Every attempt to improve it failed

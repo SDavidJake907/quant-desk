@@ -33,9 +33,9 @@ import statistics
 
 import httpx
 
-from scanner.config import settings
 from scanner.features.bars import fetch_bars
 from scanner.sources import composite, sec_tickers
+from scanner.sources.earnings_history import earnings_dates
 from scanner.sources.index_history import COMPOSITE_1500, SP400, SP500, SP600
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
@@ -43,36 +43,6 @@ GREEN, RED, YELLOW = "\033[32m", "\033[31m", "\033[33m"
 
 INDEXES = {"sp500": (SP500,), "sp400": (SP400,), "sp600": (SP600,),
            "all": COMPOSITE_1500}
-
-SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik}.json"
-
-
-async def earnings_dates(cik: int, client: httpx.AsyncClient) -> tuple[dt.date, ...]:
-    """Announcement dates from 8-K item 2.02. Empty on any failure."""
-    try:
-        response = await client.get(
-            SUBMISSIONS.format(cik=str(cik).zfill(10)),
-            headers={"User-Agent": settings.sec_user_agent},
-            follow_redirects=True, timeout=30,
-        )
-        if response.status_code != 200:
-            return ()
-        recent = response.json()["filings"]["recent"]
-    except (httpx.HTTPError, ValueError, KeyError):
-        return ()
-    forms, items, dates = recent["form"], recent.get("items", []), recent["filingDate"]
-    out = []
-    for i, form in enumerate(forms):
-        if form != "8-K":
-            continue
-        if "2.02" not in (items[i] if i < len(items) else ""):
-            continue
-        try:
-            out.append(dt.date.fromisoformat(dates[i]))
-        except ValueError:
-            continue
-    return tuple(sorted(out))
-
 
 def _index_on_or_before(days: list[dt.date], when: dt.date) -> int | None:
     lo, hi = 0, len(days) - 1
