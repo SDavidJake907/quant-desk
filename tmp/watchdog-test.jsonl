@@ -1,2 +1,0 @@
-{"at": "2026-08-06T12:05:37.230925+00:00", "command": ["python", "-c", "print('watchdog smoke ok')"], "event": "started", "restart": 0}
-{"at": "2026-08-06T12:05:37.252614+00:00", "command": ["python", "-c", "print('watchdog smoke ok')"], "event": "completed", "exit_code": 0}

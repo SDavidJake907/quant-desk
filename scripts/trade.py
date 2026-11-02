@@ -354,10 +354,11 @@ async def main(
     # broker unreachable. If activated, the scan still runs (evaluate only)
     # but sends no orders — same as the daily-loss guard.
     model_complete = pf_report.model.complete if pf_report else False
+    broker_reachable = pf_report.broker.reachable if pf_report else False
     auto_activate, auto_reason = safety.should_auto_activate(
         settings.kill_switch_path,
         model_env_complete=model_complete,
-        broker_reachable=True,  # cannot know until we connect; checked below
+        broker_reachable=broker_reachable,
     )
     if auto_activate:
         safety.activate_kill_switch(settings.kill_switch_path, auto_reason)

@@ -92,7 +92,9 @@ async def day_moves(symbols: list[str], client: httpx.AsyncClient) -> tuple[dict
 
 async def headlines(symbols: list[str], client: httpx.AsyncClient) -> list[dict]:
     """Today's headlines (since 04:00 ET) for `symbols`, newest first. [] when unreadable."""
-    start = datetime.combine(datetime.now(sat.ET).date(), time(4), tzinfo=sat.ET)
+    now = datetime.now(sat.ET)
+    # Never after now: Alpaca answers 400 to a start in the future (a dry run before 04:00 ET).
+    start = min(datetime.combine(now.date(), time(4), tzinfo=sat.ET), now - timedelta(minutes=1))
     try:
         r = await client.get(NEWS_URL, timeout=20, headers={
             "APCA-API-KEY-ID": settings.alpaca_key_id, "APCA-API-SECRET-KEY": settings.alpaca_secret_key},

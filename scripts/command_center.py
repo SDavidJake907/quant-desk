@@ -41,6 +41,9 @@ import webbrowser
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cc_trades  # noqa: E402  (the trades / position-chart panels)
+
 ROOT = Path(__file__).resolve().parents[1]
 PAPER_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets"
@@ -63,6 +66,9 @@ BOOKS = {
 #: Books held without a stop by design (policy.stopless_strategies): never flagged as naked.
 #: "SPY core" removed 2026-10-30: it carries a stop now (plan_run.core_stop_pass).
 STOPLESS = {"Momentum"}
+#: Books whose bracket target is a real exit. The others' take-profit legs are far-off
+#: placeholders (they exit on trailing rules), so their charts draw no target.
+TARGET_BOOKS = {"ORB"}
 #: Tiles shown even when the book is empty.
 MAIN_BOOKS = ("SPY core", "Rules book", "Small caps", "ORB")
 
@@ -525,6 +531,17 @@ def gather(root: Path, broker: Broker | None) -> dict:
         b["upl"] += p["upl"]
         b["today"] += p["today"]
     d["by_book"] = dict(by_book)
+
+    # --- closed trades and a chart per position -----------------------------------------
+    d["trades"] = cc_trades.round_trips(flat)
+    d["targets"] = cc_trades.live_targets(flat)
+    d["opened"] = cc_trades.entry_days(flat)
+    d["closes"] = {}
+    if positions and broker is not None:
+        syms = ",".join(sorted({p["symbol"] for p in positions}))
+        bars = broker.get(f"/v2/stocks/bars?symbols={syms}&timeframe=1Day&limit=10000&feed=iex"
+                          f"&start={cc_trades.bars_start(now.date())}", base=DATA_URL)
+        d["closes"] = cc_trades.daily_closes(bars)
     slots = []
     for label, (prefixes, cap) in slot_limits(root).items():
         names = {BOOKS[x] for x in prefixes}
@@ -780,6 +797,14 @@ def render(d: dict) -> str:
     else:
         pos_html = f"<p class='muted'>No open positions{(' — ' + esc(d['broker_error'])) if d['broker_error'] else ''}.</p>"
 
+    charts = "".join(
+        cc_trades.position_chart({**p, "stopless": p["book"] in STOPLESS}, d["closes"].get(p["symbol"], []),
+                                 d["targets"].get(p["symbol"]) if p["book"] in TARGET_BOOKS else None,
+                                 d["opened"].get(p["symbol"]))
+        for p in d["positions"]
+    )
+    trades = d["trades"]
+
     # ---- tasks ---------------------------------------------------------------------
     trows = "".join(
         f"<tr><td><span class='dot {t['status']}'></span>{esc(t['label'])}</td>"
@@ -808,7 +833,7 @@ def render(d: dict) -> str:
 
     stand_t = f"written {ago(d['standings_time'], now)}" if d.get("standings_time") else ""
     return TEMPLATE.format(
-        css=CSS, js=JS,
+        css=CSS + cc_trades.CSS, js=JS + cc_trades.JS,
         when=esc(now.strftime("%a %b %d, %H:%M AK")),
         window=esc(d["freeze"] or "FREEZE.md: no window line found"),
         pills="".join(pills),
@@ -817,6 +842,11 @@ def render(d: dict) -> str:
         comp_src=src(esc(d["series_src"])),
         standings=standings, stand_t=esc(stand_t), penny=penny, preclose=preclose, sunday=sunday, desks=desks,
         positions=pos_html,
+        charts=f"<div class='pcs'>{charts}</div>" if charts else "",
+        trade_summary=cc_trades.summary_html(cc_trades.book_summary(trades)),
+        trade_hist=cc_trades.histogram_svg(trades),
+        trade_rows=cc_trades.history_html(trades),
+        trade_n=len(trades),
         pos_src=src("Alpaca paper · positions + open stop orders · book from the latest buy's client_order_id prefix"),
         tasks=trows,
         refusals=refusals,
@@ -990,6 +1020,24 @@ TEMPLATE = """<!doctype html>
   <div class="cap">Room to stop: how far price sits above the live stop (bar full at 10%; amber under 1.5%).</div>
   {positions}
   {pos_src}
+</section>
+
+<section class="card">
+  <h2>Each position: price, entry, live stop</h2>
+  <div class="cap">Daily closes, last ~3 months. Grey dashed: entry · red: the live stop · green: ORB's live target (the other books exit on trailing rules, not a target).</div>
+  {charts}
+  <div class="src">Source: Alpaca daily bars (IEX) and open stop / limit orders</div>
+</section>
+
+<section class="card">
+  <h2>Results by book</h2>
+  <div class="cap">Closed trades rebuilt from filled orders (each sell matched to the earliest open buy). Current books on top; greyed rows are retired books. Judge a book against its index over months, not by a week's win rate.</div>
+  {trade_summary}
+  <h4>Closed trades by % result ({trade_n})</h4>
+  {trade_hist}
+  <h4>Trade history</h4>
+  {trade_rows}
+  <div class="src">Source: Alpaca paper orders (last 500, nested legs) · book from the buy's client_order_id prefix; gem- before 10-26 = Gemma (retired)</div>
 </section>
 
 <section class="card standings">

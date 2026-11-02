@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from scanner.config import settings
+from scanner.execution.safety import load_session_equity
 
 
 class PreflightError(RuntimeError):
@@ -145,6 +146,13 @@ async def run(
         reasons.append("Alpaca API keys not configured (SCANNER_ALPACA_KEY_ID / SECRET_KEY)")
         if live:
             blocked = True
+
+    # Session start equity must be configured or captured — daily-loss guard
+    # cannot detect a pre-session drawdown without it.
+    session_equity = settings.session_start_equity or load_session_equity()
+    if live and not session_equity:
+        reasons.append("SCANNER_SESSION_START_EQUITY not set — daily-loss guard cannot baseline")
+        blocked = True
 
     if not model.complete:
         missing: list[str] = []

@@ -75,3 +75,47 @@ def test_the_spy_core_is_flagged_when_naked(tmp_path):
     assert sorted(d["naked"]) == ["APA", "SPY"]
     page = cc.render(d)
     assert "no stop by design" not in page and "No live stop: APA, SPY" in page
+
+
+def _fill(sym, side, qty, px, at, coid="x", typ="market"):
+    return {"symbol": sym, "side": side, "filled_qty": str(qty), "filled_avg_price": str(px),
+            "filled_at": at, "client_order_id": coid, "type": typ, "status": "filled"}
+
+
+def test_closed_trades_match_sells_to_buys_first_in_first_out():
+    import cc_trades
+    orders = [
+        _fill("NUE", "buy", 10, 100, "2026-10-27T14:00:00Z", "gem-NUE-1"),
+        _fill("NUE", "buy", 10, 110, "2026-10-28T14:00:00Z", "gem-NUE-2"),
+        _fill("NUE", "sell", 15, 120, "2026-10-29T19:00:00Z", typ="stop"),
+        _fill("ZBRA", "buy", 5, 50, "2026-10-20T14:00:00Z", "gem-ZBRA-1"),
+        _fill("ZBRA", "sell", 5, 45, "2026-10-28T19:00:00Z"),
+        _fill("XYZ", "sell", 5, 45, "2026-10-28T19:00:00Z"),  # buy older than the history read: left out
+    ]
+    trades = {(t["symbol"], t["opened"]): t for t in cc_trades.round_trips(orders)}
+    assert set(trades) == {("NUE", "2026-10-27"), ("NUE", "2026-10-28"), ("ZBRA", "2026-10-20")}
+    assert trades[("NUE", "2026-10-27")]["pnl"] == 200 and trades[("NUE", "2026-10-27")]["how"] == "stop"
+    assert trades[("NUE", "2026-10-28")]["qty"] == 5 and trades[("NUE", "2026-10-28")]["pnl"] == 50
+    assert trades[("NUE", "2026-10-27")]["book"] == "Rules book"
+    assert trades[("ZBRA", "2026-10-20")]["book"] == "Gemma (retired)"  # gem- before 10-26
+
+
+def test_book_summary_puts_current_books_first():
+    import cc_trades
+    trades = [
+        {"book": "Picks", "pnl": 10, "pct": 1.0},
+        {"book": "ORB", "pnl": -5, "pct": -0.5},
+        {"book": "ORB", "pnl": 15, "pct": 1.5},
+    ]
+    rows = cc_trades.book_summary(trades)
+    assert [r["book"] for r in rows] == ["ORB", "Picks"]
+    assert rows[0]["won"] == 1 and rows[0]["pnl"] == 10 and not rows[1]["current"]
+
+
+def test_position_chart_flags_a_missing_stop():
+    import cc_trades
+    p = {"symbol": "NUE", "book": "Rules book", "upl": -1, "uplpc": -1.0, "entry": 100, "stop": None,
+         "stop_live": False}
+    closes = [(f"2026-10-{d:02d}", 100 + d) for d in range(1, 11)]
+    assert "no live stop" in cc_trades.position_chart(p, closes, None, "2026-10-05")
+    assert "no live stop" not in cc_trades.position_chart({**p, "stop": 95, "stop_live": True}, closes, None, None)
