@@ -175,6 +175,14 @@ python scripts/run_scan.py NVDA AAPL                # news funnel, stage by stag
 python scripts/bench_llm.py                         # is a bigger model worth it?
 ```
 
+**The desk** (a web page of everything below; see "The desk")
+
+```powershell
+python scripts/desk.py                              # http://127.0.0.1:8765
+python scripts/desk.py --demo                       # invented data, no keys needed
+python scripts/hindsight.py                         # Gemma reviews closed trades
+```
+
 **Paper trading**
 
 ```powershell
@@ -197,7 +205,7 @@ python scripts/watchdog.py -- python scripts/trade.py --dry-run  # restart scan-
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/register_tasks.ps1   # market-hours scan + data
 powershell -ExecutionPolicy Bypass -File scripts/start_all.ps1        # post-reboot health check
-python -m pytest -q                                                   # 493 tests
+python -m pytest -q                                                   # 515 tests
 ```
 
 Price bars cache to `data/` keyed by symbol, **range and interval**, so re-runs
@@ -753,6 +761,63 @@ Payout ratio is deliberately absent: it needs earnings data this project does
 not carry, and a payout ratio computed from a bad EPS figure is worse than none
 because it looks authoritative.
 
+## The desk
+
+    python scripts/desk.py
+
+A local web page, refreshed every minute, that shows the whole system end to
+end. Open `http://127.0.0.1:8765` in a browser.
+
+- **The last scan, end to end.** The universe narrowing to orders sent: how
+  many names loaded, were tradeable, set up, were fresh, passed every gate and
+  were sent, with every refusal reason at the step where it happened. Any of
+  the last 30 scans can be picked.
+- **Open positions.** A 30-minute candlestick chart with entry, stop, target
+  and the 21 EMA drawn on it; a bar running from stop to target with price
+  marked; indicators as the screen computes them; the news gate's verdict and
+  the headlines Gemma read at entry; today's headlines. Stop and target are
+  read from the broker's live orders, so a position that has lost its stop
+  says so.
+- **Waiting.** Working entry orders and the watchlist.
+- **Gemma.** Its recent rankings and news verdicts, and the scoreboard:
+  realized R and win rate grouped by the conviction it gave at entry, and how
+  many strong and weak calls were right or wrong.
+- **Trade history.** Every trade with R, P&L, Gemma's call and the shadow
+  fields. Select a row for what Gemma saw at entry and its hindsight review.
+- **Results.** Account equity curve, a histogram of trade results in R, win
+  rate, expectancy against the backtest's +0.218R, fill rate.
+
+It is read-only: the server makes GET requests to Alpaca and reads local files,
+and `tests/test_desk.py` fails if an order-placing call ever appears in it. It
+listens on 127.0.0.1; `--host 0.0.0.0` reaches it from a phone on the same
+Wi-Fi, and from anyone else on that network. The chart library (TradingView
+Lightweight Charts, Apache-2.0) is served from `scripts/vendor/`, so the page
+works offline.
+
+**What the desk can show depends on what gets logged.** Since this change,
+`trade.py` writes a run id on every record, a `scan_summary` with the
+funnel's counts, every Gemma ranking (including for setups that were
+refused), and every news-gate verdict with its headlines. Trades from before
+that show in the history but have no funnel and no entry context.
+
+### Gemma hindsight
+
+    python scripts/hindsight.py            # review closed trades not yet reviewed
+    python scripts/hindsight.py --show     # print the prompts, call nothing
+
+For each closed trade, Gemma is given what it said at entry, the headlines it
+read then, today's headlines and how the trade ended, and writes what it
+expected, what seems to have happened, what it missed and one lesson. The
+review is appended to the audit log and shown under the trade on the desk. It
+runs after the close with the data collection task.
+
+**These reviews are not evidence.** A model told the ending will always find a
+story that fits it. Nothing in the trading path reads them. Whether a call was
+right is decided by arithmetic (strong and profitable, or weak and a loss),
+and whether Gemma's ranking is worth anything is decided by the scoreboard.
+Same rules as every other model call: no numeric fields, and a quote that is
+not in the headlines is dropped.
+
 ## Execution (paper only)
 
 `scripts/trade.py` turns setups into bracket orders on an Alpaca **paper**
@@ -890,7 +955,8 @@ Two Windows tasks:
 
     stock-scanner-scan   05:33-12:03 AK, every 30 min   manage_positions.py --execute,
                                                         then trade.py --submit-paper
-    stock-scanner-data   13:00 AK daily                 collect_intraday.py --index all
+    stock-scanner-data   13:00 AK daily                 collect_intraday.py --index all,
+                                                        then hindsight.py
 
 Both run through `.bat` wrappers and append to `logs/scheduled.log`.
 

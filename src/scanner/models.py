@@ -85,6 +85,12 @@ class AuditEvent(Frozen):
     #: day cannot say which version they ran under. Once a hundred records
     #: exist beneath drifting rules, nothing can un-mix them afterwards.
     policy: str = ""
+    #: Which scan produced this record, so one run's funnel can be rebuilt.
+    run_id: str = ""
+    #: Event-specific data with no fixed shape: the news a gate read, the
+    #: model's opinions, a run's counts. Text and labels, never a price the
+    #: model produced.
+    detail: dict = Field(default_factory=dict)
 
 
 class NewsItem(Frozen):

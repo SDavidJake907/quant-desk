@@ -19,4 +19,11 @@ echo. >> "%LOG%"
 echo ===== DATA %DATE% %TIME% ===== >> "%LOG%"
 
 ".venv\Scripts\python.exe" "scripts\collect_intraday.py" --index all >> "%LOG%" 2>&1
-exit /b %errorlevel%
+set RESULT=%errorlevel%
+
+REM Gemma reviews any trades that closed today. Display only: the reviews are
+REM shown on the desk and never read by the trader. Skips quietly if Ollama
+REM is down, and must never fail the data collection above.
+".venv\Scripts\python.exe" "scripts\hindsight.py" >> "%LOG%" 2>&1
+
+exit /b %RESULT%

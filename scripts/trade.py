@@ -129,17 +129,24 @@ async def main(
 ) -> None:
     policy = policy or TradingPolicy()
     decisions: list[Decision] = []
+    run_id = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+    counts = {"symbols": 0, "loaded": 0, "liquid": 0, "setups": 0,
+              "fresh": 0, "sent": 0, "minutes": minutes, "gate": ""}
+
+    def log(event: str, symbol: str = "", **fields) -> None:
+        """Every audit record from this run carries the run id and policy."""
+        append_event(settings.audit_log_path, AuditEvent(
+            event=event, at=datetime.now().astimezone(), symbol=symbol,
+            policy=policy.fingerprint, run_id=run_id, **fields,
+        ))
 
     def record(stage, symbol, reason="", intent=None, order_id="", request_id="",
                event="candidate_refused"):
         """Every refusal is data. Printing it and moving on loses the only
         record of what the rules actually did on a quiet day."""
         decisions.append(Decision(symbol=symbol, stage=stage, reason=reason))
-        append_event(settings.audit_log_path, AuditEvent(
-            event=event, at=datetime.now().astimezone(), symbol=symbol,
-            intent=intent, reason=reason, stage=stage,
-            policy=policy.fingerprint, order_id=order_id, request_id=request_id,
-        ))
+        log(event, symbol, intent=intent, reason=reason, stage=stage,
+            order_id=order_id, request_id=request_id)
 
     async with httpx.AsyncClient() as client:
         broker = None
@@ -230,6 +237,7 @@ async def main(
                 print(f"{YELLOW}not trading: {gate.reason}"
                       f" — evaluating only, no orders will be sent{RESET}")
                 dry_run = True
+                counts["gate"] = gate.reason
 
                 # WIDEN THE FRESHNESS WINDOW, OR THIS FINDS NOTHING.
                 #
@@ -267,6 +275,7 @@ async def main(
 
         universe = await composite.load_universe(client, INDEXES[index])
         symbols = tuple(m.symbol for m in universe)
+        counts["symbols"] = len(symbols)
         sector_of = {m.symbol: m.sector for m in universe}
         range_ = max_range(minutes)
         print(f"{DIM}scanning {len(symbols)} symbols on {minutes}m bars{RESET}")
@@ -291,14 +300,19 @@ async def main(
         candidates = []
         volumes_by_symbol: dict[str, float] = {}
         for symbol, bars in zip(symbols, loaded):
-            if isinstance(bars, Exception) or not _liquid(bars):
+            if isinstance(bars, Exception):
                 continue
+            counts["loaded"] += 1
+            if not _liquid(bars):
+                continue
+            counts["liquid"] += 1
             volumes_by_symbol[symbol] = _dollar_volume(bars)
             setups = scan(bars, k=k, min_reward_risk=min_rr,
                           min_risk_pct=min_risk_pct, require_value_sweep=True,
                           require_trend_context=trend_context,
                           require_rsi_context=rsi_context,
                           require_macd_context=macd_context)
+            counts["setups"] += len(setups)
             for setup in setups:
                 if (
                     len(bars) - 1 - setup.trigger_index < fresh
@@ -325,6 +339,7 @@ async def main(
 
         # Rank by what the study supported, not by which bar printed last.
         candidates.sort(key=lambda row: priority(row[0]), reverse=True)
+        counts["fresh"] = len(candidates)
         ranks = {row[0].symbol: i + 1 for i, row in enumerate(candidates)}
         print(f"\n{BOLD}{len(candidates)} fresh setups{RESET}\n")
 
@@ -344,6 +359,15 @@ async def main(
             opinions = await ranking.rank(headlines, client, sector_of, sector_rs)
             llm_order = {o.symbol: o for o in opinions}
             llm_rank = {s: i + 1 for i, s in enumerate(ranking.order(opinions))}
+            if opinions:
+                log("llm_ranking", detail={"opinions": [
+                    {"symbol": o.symbol, "conviction": o.conviction,
+                     "driver": o.driver, "concern": o.concern,
+                     "evidence": o.evidence_quote, "grounded": o.grounded,
+                     "llm_rank": llm_rank.get(o.symbol, 0),
+                     "priority_rank": ranks.get(o.symbol, 0),
+                     "headlines": [h.title for h in headlines.get(o.symbol, ())][:5]}
+                    for o in opinions]})
             if opinions:
                 print(f"  {CYAN}Gemma's read (advisory, not acted on):{RESET}")
                 for o in sorted(opinions, key=lambda x: llm_rank.get(x.symbol, 99)):
@@ -414,6 +438,13 @@ async def main(
             if news_gate:
                 flag = await check_news(setup.symbol, client, earnings=earnings)
                 verdict = flag.verdict()
+                log("news_checked", setup.symbol, stage=CONFIRM,
+                    reason=verdict.reason, detail={
+                        "allowed": bool(verdict), "checked": flag.checked,
+                        "deal_role": flag.deal_role, "earnings": flag.earnings,
+                        "items": [{"headline": h, "category": c} for h, c in
+                                  zip(flag.headlines, flag.categories)],
+                        "filings": list(flag.filings)})
                 if flag.headlines:
                     print(f"  {DIM}{setup.symbol:<6} news: "
                           f"{', '.join(sorted(set(flag.categories))) or 'none material'}{RESET}")
@@ -466,12 +497,8 @@ async def main(
                 trigger_slot=session_slot(at),
                 trigger_weekday=at.strftime("%a"),
             )
-            append_event(settings.audit_log_path, AuditEvent(
-                event="trade_intent", at=datetime.now().astimezone(),
-                symbol=setup.symbol, intent=intent,
-                stage=TRADE if not dry_run else WATCH,
-                policy=policy.fingerprint,
-            ))
+            log("trade_intent", setup.symbol, intent=intent,
+                stage=TRADE if not dry_run else WATCH)
             print(f"  {BOLD}{setup.symbol:<6}{RESET} {sizing.shares:>5} sh @ "
                   f"{setup.entry_price:>9,.2f}   "
                   f"stop {RED}{setup.stop_price:,.2f}{RESET}   "
@@ -488,23 +515,20 @@ async def main(
             try:
                 order = await broker.submit(payload)
                 sent += 1
-                append_event(settings.audit_log_path, AuditEvent(
-                    event="order_submitted", at=datetime.now().astimezone(),
-                    symbol=setup.symbol, intent=intent,
+                log("order_submitted", setup.symbol, intent=intent,
                     order_id=str(order.get("id", "")),
-                    request_id=broker.last_request_id,
-                    stage=TRADE, policy=policy.fingerprint,
-                ))
+                    request_id=broker.last_request_id, stage=TRADE)
                 print(f"         {GREEN}submitted{RESET} {DIM}id {order.get('id', '?')}{RESET}")
             except BrokerError as exc:
-                append_event(settings.audit_log_path, AuditEvent(
-                    event="order_rejected", at=datetime.now().astimezone(),
-                    symbol=setup.symbol, intent=intent,
+                log("order_rejected", setup.symbol, intent=intent,
                     request_id=broker.last_request_id, reason=str(exc),
-                    stage=TRADE, policy=policy.fingerprint,
-                ))
+                    stage=TRADE)
                 print(f"         {RED}not submitted: {exc}{RESET}")
 
+        counts["sent"] = sent
+        log("scan_summary", detail={**counts, "dry_run": dry_run,
+                                    "policy": policy.describe(),
+                                    "refused": rejections(tuple(decisions))})
         if not dry_run:
             print(f"\n{BOLD}{sent} order(s) sent to the paper account.{RESET}")
         watchlist.save(still_waiting)

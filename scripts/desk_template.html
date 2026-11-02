@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..800&display=swap" rel="stylesheet">
+<script src="/static/lightweight-charts.js"></script>
+<style>
+:root {
+  --night: #0F1C2E;      /* page */
+  --shelf: #16283F;      /* raised surfaces */
+  --rule: #26415F;       /* lines and borders */
+  --snow: #E8EEF4;       /* text */
+  --frost: #93A7BD;      /* secondary text */
+  --aurora: #43D6B0;     /* gains, targets, passed */
+  --ember: #EE8A5A;      /* losses, stops, refused */
+  --violet: #B49CFF;     /* anything Gemma decided */
+  --gold: #E9C46A;       /* needs attention */
+  --radius: 6px;
+}
+* { box-sizing: border-box; }
+html { background: var(--night); }
+body {
+  margin: 0; background: var(--night); color: var(--snow);
+  font-family: "Archivo", system-ui, sans-serif; font-size: 15px; line-height: 1.5;
+  font-variant-numeric: tabular-nums; font-feature-settings: "tnum";
+}
+a { color: var(--snow); }
+:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 80px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px;
+  border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
+.brand { font-stretch: 125%; font-weight: 800; font-size: 22px; letter-spacing: -.01em; }
+.status { color: var(--frost); font-size: 13px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+  vertical-align: 1px; background: var(--frost); }
+.dot.on { background: var(--aurora); }
+.spacer { flex: 1; }
+button { font: inherit; color: var(--snow); background: var(--shelf); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--frost); }
+.demo { background: var(--gold); color: var(--night); font-weight: 700; padding: 6px 12px;
+  border-radius: var(--radius); margin: 16px 0 0; }
+.error { border: 1px solid var(--ember); color: var(--ember); padding: 12px; border-radius: var(--radius); margin-top: 16px; }
+
+/* the ledger line: account figures, set as a sentence rather than cards */
+.ledger { display: flex; flex-wrap: wrap; gap: 6px 36px; padding: 22px 0 6px; }
+.fig .v { font-size: 30px; font-weight: 650; font-stretch: 90%; line-height: 1.1; }
+.fig .l { color: var(--frost); font-size: 13px; }
+.fig .s { color: var(--frost); font-size: 13px; }
+.up { color: var(--aurora); } .down { color: var(--ember); } .gem { color: var(--violet); }
+
+section { padding-top: 40px; }
+h2 { font-stretch: 112%; font-weight: 750; font-size: 20px; margin: 0 0 4px; }
+.lede { color: var(--frost); margin: 0 0 18px; max-width: 70ch; }
+
+/* ---- the pipeline: the one loud element on the page ---- */
+.runs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 14px; }
+.runs button { white-space: nowrap; font-size: 13px; padding: 4px 10px; }
+.runs button[aria-pressed="true"] { background: var(--snow); color: var(--night); border-color: var(--snow); }
+.flow { display: grid; grid-template-columns: minmax(130px, 170px) 1fr; gap: 0 16px; }
+.stage-label { color: var(--frost); font-size: 14px; padding: 7px 0; text-align: right; }
+.stage-bar { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+.stage-bar .bar { height: 30px; background: linear-gradient(90deg, #2B5C7E, #3C8FA0);
+  border-radius: 3px; flex: none; }
+.stage-bar .n { font-weight: 700; font-size: 16px; }
+.stage-bar.last .bar { background: var(--aurora); }
+.stage-bar.last .n { color: var(--aurora); }
+.stage-bar.zero .bar { background: transparent; border: 1px dashed var(--rule); }
+.stage-bar.zero .n { color: var(--frost); }
+@media (prefers-reduced-motion: no-preference) {
+  .flow.animate .bar { animation: grow .8s cubic-bezier(.2,.7,.2,1) both; }
+  .flow.animate .stage-bar:nth-child(4) .bar { animation-delay: .05s; }
+  .flow.animate .stage-bar:nth-child(6) .bar { animation-delay: .1s; }
+  .flow.animate .stage-bar:nth-child(8) .bar { animation-delay: .15s; }
+  .flow.animate .stage-bar:nth-child(10) .bar { animation-delay: .2s; }
+  .flow.animate .stage-bar:nth-child(12) .bar { animation-delay: .25s; }
+  .flow.animate .stage-bar:nth-child(14) .bar { animation-delay: .3s; }
+  @keyframes grow { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+}
+.drops { grid-column: 2; margin: 2px 0 6px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
+.drops span { color: var(--ember); }
+.run-note { color: var(--frost); font-size: 13px; margin-top: 10px; }
+
+/* ---- positions ---- */
+.pos { border-top: 1px solid var(--rule); padding: 22px 0; display: grid; gap: 18px 28px;
+  grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); }
+.pos:first-of-type { border-top: 0; }
+.sym { font-stretch: 118%; font-weight: 800; font-size: 26px; line-height: 1; }
+.sector { color: var(--frost); font-size: 13px; margin-top: 4px; }
+.pl { font-size: 22px; font-weight: 650; margin-top: 12px; }
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 10px 0 0; font-size: 14px; }
+dl.kv dt { color: var(--frost); } dl.kv dd { margin: 0; text-align: right; }
+.naked { color: var(--night); background: var(--ember); font-weight: 700; padding: 4px 8px;
+  border-radius: 4px; display: inline-block; margin-top: 10px; font-size: 13px; }
+.gauge { margin-top: 14px; }
+.gauge svg { width: 100%; height: 34px; display: block; }
+.chart { height: 300px; border: 1px solid var(--rule); border-radius: var(--radius); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.chip { font-size: 12.5px; padding: 3px 8px; border-radius: 99px; border: 1px solid var(--rule); color: var(--frost); }
+.chip.yes { border-color: rgba(67,214,176,.5); color: var(--aurora); }
+.readings { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; color: var(--frost); margin-top: 10px; }
+.readings b { color: var(--snow); font-weight: 600; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; grid-column: 1 / -1; }
+.panel { background: var(--shelf); border-radius: var(--radius); padding: 14px 16px; }
+.panel h3 { font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+.panel.gemma { border-left: 3px solid var(--violet); }
+.panel ul { margin: 0; padding-left: 18px; } .panel li { margin: 4px 0; }
+.cat { color: var(--violet); font-size: 12px; margin-left: 6px; }
+.quote { border-left: 2px solid var(--violet); padding-left: 10px; color: var(--snow); margin: 8px 0 0; font-style: italic; }
+.muted { color: var(--frost); }
+.empty { color: var(--frost); padding: 16px 0; }
+
+/* ---- tables ---- */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th { text-align: left; color: var(--frost); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid rgba(38,65,95,.55); white-space: nowrap; }
+td.num, th.num { text-align: right; }
+tr.expandable { cursor: pointer; } tr.expandable:hover td { background: rgba(22,40,63,.7); }
+tr.detail td { white-space: normal; background: var(--shelf); padding: 16px 18px; }
+.verdict-right { color: var(--aurora); } .verdict-wrong { color: var(--ember); } .verdict-no { color: var(--frost); }
+.hind { display: grid; grid-template-columns: 110px 1fr; gap: 6px 14px; max-width: 900px; }
+.hind dt { color: var(--violet); } .hind dd { margin: 0; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.filters button[aria-pressed="true"] { background: var(--snow); color: var(--night); }
+
+.two { display: grid; grid-template-columns: 1.4fr 1fr; gap: 28px; }
+.equity { height: 260px; }
+.hist svg { width: 100%; height: 200px; display: block; }
+.log > ul > li { list-style: none; border-top: 1px solid var(--rule); padding: 10px 0; }
+.log > ul { padding: 0; margin: 0; }
+.log li li { color: var(--frost); font-size: 14px; }
+.tag { font-size: 12px; padding: 2px 7px; border-radius: 4px; margin-right: 6px; }
+.tag.strong { background: rgba(67,214,176,.15); color: var(--aurora); }
+.tag.weak { background: rgba(238,138,90,.15); color: var(--ember); }
+.tag.neutral { background: rgba(147,167,189,.15); color: var(--frost); }
+.tag.blocked { background: var(--ember); color: var(--night); font-weight: 700; }
+.tag.passed { background: rgba(67,214,176,.15); color: var(--aurora); }
+footer { color: var(--frost); font-size: 13px; margin-top: 56px; border-top: 1px solid var(--rule); padding-top: 14px; max-width: 80ch; }
+
+.pos > *, .cols > *, .two > * { min-width: 0; }
+@media (max-width: 860px) {
+  .pos, .cols, .two { grid-template-columns: minmax(0, 1fr); }
+  .flow { grid-template-columns: 110px 1fr; }
+  .stage-label { font-size: 13px; }
+  .fig .v { font-size: 24px; }
+  .chart { height: 240px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div class="brand">Desk</div>
+    <div class="status" id="status">Loading…</div>
+    <div class="spacer"></div>
+    <button id="refresh" type="button">Refresh now</button>
+  </header>
+  <div id="banner"></div>
+  <div class="ledger" id="ledger"></div>
+
+  <section aria-labelledby="h-run">
+    <h2 id="h-run">The last scan, end to end</h2>
+    <p class="lede">Every 30 minutes the scanner starts from the whole universe and narrows it down. Each bar is how many names survived that step, on a log scale so the last steps stay visible; the reasons below a step are why the rest were refused.</p>
+    <div class="runs" id="runs" role="group" aria-label="Choose a scan"></div>
+    <div class="flow" id="flow"></div>
+    <div class="run-note" id="run-note"></div>
+  </section>
+
+  <section aria-labelledby="h-pos">
+    <h2 id="h-pos">Open positions</h2>
+    <p class="lede">Live stop and target are read from the broker, not from what was intended. The bar under each position runs from stop to target; the dot is where price is now.</p>
+    <div id="positions"></div>
+  </section>
+
+  <section aria-labelledby="h-wait">
+    <h2 id="h-wait">Waiting</h2>
+    <p class="lede">Orders sent but not filled, and setups deferred until a blocker clears.</p>
+    <div class="cols" style="grid-template-columns:1fr 1fr" id="waiting"></div>
+  </section>
+
+  <section aria-labelledby="h-gem">
+    <h2 id="h-gem">Gemma</h2>
+    <p class="lede">Gemma reads the news. It can refuse a trade through the news gate but never finds, prices or sizes one. Its ranking is recorded, not obeyed, until the scoreboard shows its strong calls beat its weak ones.</p>
+    <div class="two">
+      <div>
+        <h3 style="font-size:15px;margin:0 0 8px">Scoreboard, closed trades</h3>
+        <div class="scroll"><table id="score"></table></div>
+        <p class="muted" style="font-size:13px">A call is right when strong ended in profit or weak ended in a loss. Neutral is not a call. Decided by the outcome, not by Gemma.</p>
+      </div>
+      <div class="log"><h3 style="font-size:15px;margin:0 0 8px">Recent decisions</h3><ul id="gemlog"></ul></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-hist">
+    <h2 id="h-hist">Trade history</h2>
+    <p class="lede">Every trade this system placed. Select a row for what Gemma saw at entry and its hindsight review.</p>
+    <div class="filters" id="filters" role="group" aria-label="Filter trades"></div>
+    <div class="scroll"><table id="trades"></table></div>
+  </section>
+
+  <section aria-labelledby="h-eq">
+    <h2 id="h-eq">Equity and results</h2>
+    <div class="two">
+      <div><div class="equity" id="equity"></div></div>
+      <div class="hist"><h3 style="font-size:15px;margin:0 0 4px">Result of each closed trade, in R</h3><div id="hist"></div><p class="muted" style="font-size:13px" id="hist-note"></p></div>
+    </div>
+  </section>
+
+  <footer>Read-only. This page never places, cancels or changes an order. Paper account. Gemma's hindsight reviews are written after the outcome is known, so they explain rather than prove; judge Gemma by the scoreboard.</footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money = (v, sign) => v == null ? "–" : (sign && v > 0 ? "+" : "") + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pct = (v) => v == null ? "–" : (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+const rr = (v) => v == null ? "–" : (v > 0 ? "+" : "") + v.toFixed(2) + "R";
+const cls = (v) => v == null ? "" : v > 0 ? "up" : v < 0 ? "down" : "";
+const when = (iso) => { if (!iso) return "–"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(undefined, {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}); };
+const day = (iso) => { if (!iso) return "–"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleDateString(undefined, {month: "short", day: "numeric"}); };
+const STATE = {target: "Target hit", stop: "Stopped", closed: "Closed early", open: "Open", expired: "Expired", rejected: "Rejected", working: "Working"};
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+let data = null, runIndex = 0, filter = "all", charts = [], first = true;
+
+async function load(refresh) {
+  $("status").textContent = refresh ? "Refreshing…" : $("status").textContent;
+  try {
+    const res = await fetch("/api/snapshot" + (refresh ? "?refresh=1" : ""));
+    data = await res.json();
+  } catch (e) {
+    data = {error: "The desk server is not answering. Is scripts/desk.py still running?"};
+  }
+  render();
+}
+
+function render() {
+  if (data.error) {
+    $("banner").innerHTML = `<div class="error">Could not build the page: ${esc(data.error)}</div>`;
+    $("status").textContent = "Error";
+    return;
+  }
+  $("banner").innerHTML = data.demo ? `<div class="demo">Demo data. Nothing here is from your account. Run without --demo to see your own.</div>` : "";
+  $("status").innerHTML = `<span class="dot ${data.market_open ? "on" : ""}"></span>Market ${data.market_open ? "open" : "closed"} · paper account · updated ${when(data.generated_at)} · policy ${esc(data.policy)}`;
+  renderLedger(); renderRuns(); renderPositions(); renderWaiting(); renderGemma(); renderTrades(); renderResults();
+  first = false;
+}
+
+function renderLedger() {
+  const a = data.account, p = data.performance;
+  const total = a.start_equity ? a.equity - a.start_equity : null;
+  const figs = [
+    ["Equity", money(a.equity), "", `cash ${money(a.cash)}`],
+    ["Today", money(a.day_pl, true), cls(a.day_pl), pct(a.day_pl_pct)],
+    ["Since the curve starts", money(total, true), cls(total), a.start_equity ? `from ${money(a.start_equity)}` : ""],
+    ["Realized on closed trades", money(p.realized_pnl, true), cls(p.realized_pnl), `open ${money(p.unrealized_pnl, true)}`],
+    ["Win rate", p.win_rate == null ? "–" : p.win_rate.toFixed(0) + "%", "", `${p.wins} won, ${p.losses} lost`],
+    ["Expectancy", rr(p.expectancy_r), cls(p.expectancy_r), `backtest ${rr(p.backtest_expectancy_r)}`],
+    ["Fill rate", p.fill_rate == null ? "–" : p.fill_rate.toFixed(0) + "%", "", `${p.sent ?? 0} orders sent`],
+  ];
+  $("ledger").innerHTML = figs.map(([l, v, c, s]) => `<div class="fig"><div class="l">${l}</div><div class="v ${c}">${v}</div><div class="s">${esc(s)}</div></div>`).join("");
+}
+
+function renderRuns() {
+  const runs = data.runs || [];
+  if (!runs.length) {
+    $("runs").innerHTML = ""; $("flow").innerHTML = `<div class="empty" style="grid-column:1/-1">No scans recorded yet. The pipeline appears after the next run of trade.py.</div>`;
+    $("run-note").textContent = ""; return;
+  }
+  $("runs").innerHTML = runs.map((r, i) => `<button type="button" aria-pressed="${i === runIndex}" data-i="${i}">${when(r.at)}${r.summary && r.summary.dry_run ? " · evaluating" : ""}</button>`).join("");
+  $("runs").querySelectorAll("button").forEach(b => b.onclick = () => { runIndex = +b.dataset.i; renderRuns(); });
+  const run = runs[runIndex], steps = run.funnel || [];
+  const max = Math.max(...steps.map(s => s.count || 0), 1);
+  const width = (n) => n ? Math.max(2, 88 * Math.log10(n + 1) / Math.log10(max + 1)) : 0;
+  let html = "";
+  steps.forEach((s, i) => {
+    const last = i === steps.length - 1;
+    html += `<div class="stage-label">${esc(s.label)}</div><div class="stage-bar ${last ? "last" : ""} ${s.count ? "" : "zero"}"><div class="bar" style="width:${s.count ? width(s.count) : 3}%"></div><span class="n">${s.count.toLocaleString()}</span></div>`;
+    if (s.label === "Fresh and live" && run.refused && run.refused.length) {
+      html += `<div class="drops">${run.refused.map(r => `<div><span>−${r.count}</span> ${esc(r.reason)}</div>`).join("")}</div>`;
+    }
+  });
+  $("flow").innerHTML = html;
+  $("flow").classList.toggle("animate", first);
+  const s = run.summary || {};
+  const notes = [];
+  if (s.gate) notes.push(`Not trading this run: ${s.gate}. It evaluated anyway and sent nothing.`);
+  if (run.unprotected && run.unprotected.length) notes.push(`Found with no live stop: ${run.unprotected.join(", ")}.`);
+  if (run.rejected && run.rejected.length) notes.push(`Broker rejected: ${run.rejected.map(r => r.symbol + " (" + r.reason + ")").join(", ")}.`);
+  $("run-note").textContent = notes.join(" ");
+}
+
+function gauge(stop, target, entry, price) {
+  if (!(stop && target && entry && price) || target <= stop) return "";
+  const lo = Math.min(stop, price), hi = Math.max(target, price), x = (v) => 8 + 284 * (v - lo) / (hi - lo || 1);
+  const r = (price - entry) / (entry - stop);
+  return `<svg viewBox="0 0 300 34" role="img" aria-label="Price is ${rr(r)} between stop ${stop} and target ${target}">
+    <line x1="${x(stop)}" x2="${x(target)}" y1="14" y2="14" stroke="${css("--rule")}" stroke-width="4" stroke-linecap="round"/>
+    <line x1="${x(entry)}" x2="${x(price)}" y1="14" y2="14" stroke="${price >= entry ? css("--aurora") : css("--ember")}" stroke-width="4"/>
+    <line x1="${x(entry)}" x2="${x(entry)}" y1="6" y2="22" stroke="${css("--snow")}" stroke-width="2"/>
+    <circle cx="${x(price)}" cy="14" r="6" fill="${css("--snow")}"/>
+    <text x="${x(stop)}" y="32" fill="${css("--ember")}" font-size="10" text-anchor="start">stop</text>
+    <text x="${x(target)}" y="32" fill="${css("--aurora")}" font-size="10" text-anchor="end">target</text>
+  </svg>`;
+}
+
+function renderPositions() {
+  charts.forEach(c => c.remove()); charts = [];
+  const ps = data.positions || [];
+  if (!ps.length) { $("positions").innerHTML = `<div class="empty">No open positions.</div>`; return; }
+  $("positions").innerHTML = ps.map((p, i) => {
+    const t = p.trade || {}, ind = p.indicators || {}, flags = ind.flags || {};
+    const stop = p.live_stop, target = p.live_target;
+    const r = t.r;
+    const protectedNote = !stop ? `<div class="naked">No live stop. Run protect.py --submit</div>` : (!target ? `<div class="naked" style="background:var(--gold)">Stop is live, target is missing</div>` : "");
+    const op = (t.entry_context && t.entry_context.opinion) || null;
+    const news = p.news_at_entry;
+    return `<article class="pos">
+      <div>
+        <div class="sym">${esc(p.symbol)}</div>
+        <div class="sector">${esc(t.sector || "")}${t.filled_at ? " · filled " + when(t.filled_at) : ""}</div>
+        <div class="pl ${cls(p.unrealized_pl)}">${money(p.unrealized_pl, true)} <span style="font-size:16px">${rr(r)}</span></div>
+        <div class="gauge">${gauge(stop || t.stop, target || t.target, p.avg_entry, p.price)}</div>
+        <dl class="kv">
+          <dt>Shares</dt><dd>${p.qty}</dd>
+          <dt>Entry</dt><dd>${money(p.avg_entry)}</dd>
+          <dt>Now</dt><dd>${money(p.price)} <span class="${cls(p.change_today_pct)}">${pct(p.change_today_pct)}</span></dd>
+          <dt>Live stop</dt><dd class="down">${stop ? money(stop) : "none"}</dd>
+          <dt>Live target</dt><dd class="up">${target ? money(target) : "none"}</dd>
+          <dt>Value</dt><dd>${money(p.market_value)}</dd>
+        </dl>
+        ${protectedNote}
+      </div>
+      <div>
+        <div class="chart" id="chart-${i}" role="img" aria-label="${esc(p.symbol)} 30-minute chart with entry, stop and target"></div>
+        <div class="chips">${Object.entries(flags).map(([k, v]) => `<span class="chip ${v ? "yes" : ""}">${v ? "✓" : "✗"} ${esc(k)}</span>`).join("")}</div>
+        <div class="readings">
+          <span>RSI 14 <b>${ind.rsi14 != null ? ind.rsi14.toFixed(1) : "–"}</b></span>
+          <span>ATR <b>${ind.atr_pct != null ? ind.atr_pct.toFixed(2) + "%" : "–"}</b></span>
+          <span>EMA 21 <b>${ind.ema21 != null ? money(ind.ema21) : "–"}</b></span>
+          <span>EMA 50 <b>${ind.ema50 != null ? money(ind.ema50) : "–"}</b></span>
+          <span>MACD hist <b>${ind.macd_histogram != null ? ind.macd_histogram.toFixed(3) : "–"}</b></span>
+          <span>Volume vs average <b>${ind.volume_ratio != null ? ind.volume_ratio.toFixed(2) + "×" : "–"}</b></span>
+        </div>
+      </div>
+      <div class="cols">
+        <div class="panel gemma">
+          <h3>Gemma at entry</h3>
+          ${t.conviction || op ? `<div><span class="tag ${esc(t.conviction || op.conviction)}">${esc(t.conviction || op.conviction)}</span>driven by ${esc(t.driver || (op && op.driver) || "–")}</div>
+            <div class="muted" style="margin-top:6px">Concern: ${esc(t.concern || (op && op.concern) || "none")}</div>
+            ${op && op.evidence ? `<div class="quote">${esc(op.evidence)}</div>` : ""}` : `<div class="muted">No ranking recorded for this trade.</div>`}
+          ${news ? `<h3 style="margin-top:14px">News gate</h3><div><span class="tag ${news.allowed === false ? "blocked" : "passed"}">${news.allowed === false ? "blocked" : "passed"}</span>${esc(news.reason || (news.checked === false ? "news was not checked" : "nothing material against it"))}</div>
+            <ul style="margin-top:6px">${(news.items || []).map(n => `<li>${esc(n.headline)}<span class="cat">${esc(n.category)}</span></li>`).join("")}</ul>` : ""}
+        </div>
+        <div class="panel">
+          <h3>Headlines now</h3>
+          ${(p.headlines || []).length ? `<ul>${p.headlines.map(h => `<li>${h.link ? `<a href="${esc(h.link)}" target="_blank" rel="noopener">${esc(h.title)}</a>` : esc(h.title)} <span class="muted" style="font-size:12px">${esc(day(h.published))}</span></li>`).join("")}</ul>` : `<div class="muted">No recent headlines.</div>`}
+        </div>
+      </div>
+    </article>`;
+  }).join("");
+  if (!window.LightweightCharts) {
+    ps.forEach((_, i) => { $("chart-" + i).innerHTML = `<div class="empty" style="padding:16px">The chart library did not load. Restart scripts/desk.py.</div>`; });
+    return;
+  }
+  ps.forEach((p, i) => {
+    const el = $("chart-" + i), t = p.trade || {};
+    if (!p.chart || !p.chart.length) { el.innerHTML = `<div class="empty" style="padding:16px">No bars available.</div>`; return; }
+    const chart = LightweightCharts.createChart(el, {
+      autoSize: true,
+      layout: {background: {color: "transparent"}, textColor: css("--frost"), fontFamily: "Archivo"},
+      grid: {vertLines: {color: "rgba(38,65,95,.35)"}, horzLines: {color: "rgba(38,65,95,.35)"}},
+      rightPriceScale: {borderColor: css("--rule")},
+      timeScale: {borderColor: css("--rule"), timeVisible: true},
+      crosshair: {mode: 0},
+    });
+    const s = chart.addCandlestickSeries({upColor: css("--aurora"), downColor: css("--ember"), borderVisible: false,
+      wickUpColor: css("--aurora"), wickDownColor: css("--ember")});
+    s.setData(p.chart);
+    const line = (price, color, title, style) => price && s.createPriceLine({price, color, title, lineWidth: 1, lineStyle: style, axisLabelVisible: true});
+    line(p.avg_entry, css("--snow"), "entry", 2);
+    line(p.live_stop || t.stop, css("--ember"), p.live_stop ? "stop" : "stop (not live)", 0);
+    line(p.live_target || t.target, css("--aurora"), p.live_target ? "target" : "target (not live)", 0);
+    const ind = p.indicators || {};
+    if (ind.ema21) line(ind.ema21, "rgba(180,156,255,.6)", "EMA 21", 3);
+    chart.timeScale().fitContent();
+    charts.push(chart);
+  });
+}
+
+function renderWaiting() {
+  const w = data.working || [], wl = data.watchlist || [];
+  const tbl = (rows, head) => rows.length ? `<div class="scroll"><table><tr>${head}</tr>${rows}</table></div>` : "";
+  $("waiting").innerHTML = `
+    <div><h3 style="font-size:15px;margin:0 0 6px">Working orders</h3>${w.length ? tbl(w.map(o => `<tr><td><b>${esc(o.symbol)}</b></td><td class="num">${o.shares}</td><td class="num">${money(o.intended_entry)}</td><td class="num down">${money(o.stop)}</td><td class="num up">${money(o.target)}</td></tr>`).join(""), `<th>Symbol</th><th class="num">Shares</th><th class="num">Limit</th><th class="num">Stop</th><th class="num">Target</th>`) : `<div class="empty">None. Unfilled entries are cancelled after two bars.</div>`}</div>
+    <div><h3 style="font-size:15px;margin:0 0 6px">Watchlist</h3>${wl.length ? tbl(wl.map(e => `<tr><td><b>${esc(e.symbol)}</b></td><td style="white-space:normal">${esc(e.reason)}</td><td class="num">${e.eligible_on ? day(e.eligible_on) : "next run"}</td></tr>`).join(""), `<th>Symbol</th><th>Why it waits</th><th class="num">Eligible</th>`) : `<div class="empty">Nothing deferred.</div>`}</div>`;
+}
+
+function renderGemma() {
+  const sb = data.scoreboard || [];
+  $("score").innerHTML = `<tr><th>Conviction</th><th class="num">Trades</th><th class="num">Mean R</th><th class="num">Win rate</th><th class="num">Right</th><th class="num">Wrong</th></tr>` +
+    sb.map(r => `<tr><td><span class="tag ${r.conviction}">${r.conviction}</span></td><td class="num">${r.n}</td><td class="num ${cls(r.mean_r)}">${rr(r.mean_r)}</td><td class="num">${r.win_rate == null ? "–" : r.win_rate.toFixed(0) + "%"}</td><td class="num">${r.conviction === "neutral" ? "–" : r.right}</td><td class="num">${r.conviction === "neutral" ? "–" : r.wrong}</td></tr>`).join("");
+  const log = data.gemma || [];
+  $("gemlog").innerHTML = log.length ? log.slice(0, 25).map(e => e.kind === "ranking"
+    ? `<li><span class="muted" style="font-size:12px">${when(e.at)}</span><br><b>${esc(e.symbol)}</b> <span class="tag ${esc(e.conviction)}">${esc(e.conviction)}</span> driven by ${esc(e.driver)}${e.concern && e.concern !== "none" ? ` · <span class="muted">${esc(e.concern)}</span>` : ""}${e.evidence ? `<div class="quote">${esc(e.evidence)}</div>` : ""}${e.grounded === false ? `<div class="muted" style="font-size:12px">Quote could not be found in the source, so it was dropped.</div>` : ""}</li>`
+    : `<li><span class="muted" style="font-size:12px">${when(e.at)}</span><br><b>${esc(e.symbol)}</b> <span class="tag ${e.allowed === false ? "blocked" : "passed"}">news gate ${e.allowed === false ? "blocked" : "passed"}</span>${e.reason ? esc(e.reason) : ""}${(e.items || []).length ? `<ul style="margin-top:4px">${e.items.slice(0, 3).map(n => `<li>${esc(n.headline)}<span class="cat">${esc(n.category)}</span></li>`).join("")}</ul>` : ""}</li>`
+  ).join("") : `<li class="muted">No decisions recorded yet. They appear after the next scan.</li>`;
+}
+
+function renderTrades() {
+  const all = (data.trades || []).filter(t => t.tracked && t.state !== "rejected" && t.state !== "expired");
+  const opts = [["all", "All"], ["win", "Winners"], ["loss", "Losers"], ["right", "Gemma right"], ["wrong", "Gemma wrong"], ["reviewed", "Has hindsight"]];
+  $("filters").innerHTML = opts.map(([k, l]) => `<button type="button" aria-pressed="${filter === k}" data-k="${k}">${l}</button>`).join("");
+  $("filters").querySelectorAll("button").forEach(b => b.onclick = () => { filter = b.dataset.k; renderTrades(); });
+  const keep = {all: () => true, win: t => t.r > 0, loss: t => t.r != null && t.r <= 0, right: t => t.verdict === "right", wrong: t => t.verdict === "wrong", reviewed: t => !!t.hindsight}[filter];
+  const rows = all.filter(keep);
+  if (!rows.length) { $("trades").innerHTML = `<tr><td class="empty">No trades match.</td></tr>`; return; }
+  $("trades").innerHTML = `<tr><th>Date</th><th>Symbol</th><th>Outcome</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">R</th><th class="num">P&amp;L</th><th>Gemma said</th><th>Call</th><th>Slot</th><th>RSI gate</th></tr>` +
+    rows.map((t, i) => {
+      const v = t.verdict === "right" ? "verdict-right" : t.verdict === "wrong" ? "verdict-wrong" : "verdict-no";
+      const h = t.hindsight, op = (t.entry_context && t.entry_context.opinion) || {};
+      return `<tr class="expandable" tabindex="0" aria-expanded="false" data-i="${i}">
+        <td>${day(t.filled_at || t.submitted_at)}</td><td><b>${esc(t.symbol)}</b></td><td>${STATE[t.state] || esc(t.state)}</td>
+        <td class="num">${money(t.entry)}</td><td class="num">${money(t.exit)}</td>
+        <td class="num ${cls(t.r)}">${rr(t.r)}</td><td class="num ${cls(t.pnl)}">${money(t.pnl, true)}</td>
+        <td>${t.conviction ? `<span class="tag ${esc(t.conviction)}">${esc(t.conviction)}</span>` : "–"}</td>
+        <td class="${v}">${t.verdict || "–"}</td><td>${esc(t.slot)} ${esc(t.weekday)}</td><td>${t.rsi_gate == null ? "–" : t.rsi_gate ? "pass" : "fail"}</td></tr>
+        <tr class="detail" hidden><td colspan="11">
+          <dl class="hind">
+            <dt>At entry</dt><dd>${t.conviction ? `<span class="tag ${esc(t.conviction)}">${esc(t.conviction)}</span>driven by ${esc(t.driver || "–")}. Concern: ${esc(t.concern || "none")}.` : "No opinion recorded."}${op.evidence ? `<div class="quote">${esc(op.evidence)}</div>` : ""}</dd>
+            ${(op.headlines || []).length ? `<dt>It read</dt><dd><ul style="margin:0;padding-left:18px">${op.headlines.map(x => `<li>${esc(x)}</li>`).join("")}</ul></dd>` : ""}
+            <dt>Outcome</dt><dd>${STATE[t.state] || esc(t.state)}, ${rr(t.r)}, ${money(t.pnl, true)}. Stop ${money(t.stop)}, target ${money(t.target)}.</dd>
+            ${h ? `<dt>Expected</dt><dd>${esc(h.expected)}</dd>
+                   <dt>What happened</dt><dd>${esc(h.what_happened)}${h.evidence_quote ? `<div class="quote">${esc(h.evidence_quote)}</div>` : ""}</dd>
+                   <dt>Missed</dt><dd>${esc(h.missed)}</dd>
+                   <dt>Driver, looking back</dt><dd>${esc(h.driver_in_hindsight)}${t.driver && h.driver_in_hindsight !== t.driver ? ` <span class="muted">(said ${esc(t.driver)} at entry)</span>` : ""}</dd>
+                   <dt>Lesson</dt><dd>${esc(h.lesson)}</dd>
+                   <dt></dt><dd class="muted" style="font-size:12px">Written by ${esc(h.model || "Gemma")} on ${day(h.at)}, after the outcome was known.${h.grounded === false ? " Its quote could not be found in the headlines and was dropped." : ""}</dd>`
+                 : `<dt>Hindsight</dt><dd class="muted">Not reviewed yet. Run scripts/hindsight.py with Ollama running.</dd>`}
+          </dl></td></tr>`;
+    }).join("");
+  $("trades").querySelectorAll("tr.expandable").forEach(tr => {
+    const toggle = () => { const d = tr.nextElementSibling; d.hidden = !d.hidden; tr.setAttribute("aria-expanded", String(!d.hidden)); };
+    tr.onclick = toggle; tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+  });
+}
+
+let equityChart = null;
+function renderResults() {
+  if (equityChart) { equityChart.remove(); equityChart = null; }
+  const curve = data.equity_curve || [];
+  if (window.LightweightCharts && curve.length > 1) {
+    equityChart = LightweightCharts.createChart($("equity"), {autoSize: true,
+      layout: {background: {color: "transparent"}, textColor: css("--frost"), fontFamily: "Archivo"},
+      grid: {vertLines: {visible: false}, horzLines: {color: "rgba(38,65,95,.35)"}},
+      rightPriceScale: {borderColor: css("--rule")}, timeScale: {borderColor: css("--rule")}});
+    const up = curve[curve.length - 1].value >= curve[0].value;
+    equityChart.addAreaSeries({lineColor: up ? css("--aurora") : css("--ember"),
+      topColor: up ? "rgba(67,214,176,.25)" : "rgba(238,138,90,.25)", bottomColor: "rgba(15,28,46,0)", lineWidth: 2})
+      .setData(curve);
+    equityChart.timeScale().fitContent();
+  } else { $("equity").innerHTML = `<div class="empty">No equity history yet.</div>`; }
+
+  const rs = (data.performance || {}).r_values || [];
+  if (!rs.length) { $("hist").innerHTML = `<div class="empty">No closed trades yet.</div>`; $("hist-note").textContent = ""; return; }
+  const bins = []; for (let b = -3; b < 4; b += 0.5) bins.push({lo: b, n: 0});
+  rs.forEach(r => { const i = Math.min(bins.length - 1, Math.max(0, Math.floor((r + 3) / 0.5))); bins[i].n++; });
+  const max = Math.max(...bins.map(b => b.n)), W = 300, H = 180, bw = W / bins.length;
+  $("hist").innerHTML = `<svg viewBox="0 0 ${W} ${H + 20}" role="img" aria-label="Histogram of trade results in R">
+    ${bins.map((b, i) => { const h = b.n ? (H - 10) * b.n / max : 0; return `<rect x="${i * bw + 2}" y="${H - h}" width="${bw - 4}" height="${h}" fill="${b.lo >= 0 ? css("--aurora") : css("--ember")}" opacity=".85"><title>${b.lo} to ${b.lo + 0.5}R: ${b.n}</title></rect>`; }).join("")}
+    <line x1="${6 * bw}" x2="${6 * bw}" y1="0" y2="${H}" stroke="${css("--frost")}" stroke-dasharray="3 3"/>
+    ${[-3, -2, -1, 0, 1, 2, 3].map(v => `<text x="${(v + 3) / 0.5 * bw}" y="${H + 14}" fill="${css("--frost")}" font-size="10" text-anchor="middle">${v}R</text>`).join("")}
+  </svg>`;
+  const p = data.performance;
+  $("hist-note").textContent = `Average win ${rr(p.avg_win_r)}, average loss ${rr(p.avg_loss_r)}, best ${rr(p.best_r)}, worst ${rr(p.worst_r)}${p.profit_factor ? `, profit factor ${p.profit_factor.toFixed(2)}` : ""}.`;
+}
+
+$("refresh").onclick = () => load(true);
+load(false);
+setInterval(() => load(false), 60_000);
+</script>
+</body>
+</html>
