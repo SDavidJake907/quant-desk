@@ -34,12 +34,10 @@ from pathlib import Path
 import httpx
 
 from scanner.config import settings
-from scanner.execution.alpaca import (
-    Alpaca, BrokerError, bracket_payload, entry_payload, stop_payload,
-    take_profit_payload,
-)
+from scanner.execution.alpaca import Alpaca, BrokerError, order_payloads
 from scanner.execution.audit import append_event
 from scanner.execution import continuity
+from scanner.execution import ownership
 from scanner.execution.guards import (
     RiskLimits, check_account, check_symbol, late_signal, sector_concentration,
 )
@@ -360,11 +358,16 @@ async def main(
         model_env_complete=model_complete,
         broker_reachable=broker_reachable,
     )
-    if auto_activate:
+    # The kill switch file stops EVERY book (index core, rules book, small caps), and it stays
+    # until someone removes it. Since the sweep shares the account (2026-11-01), only a run of
+    # broker rejections sets it; a model or broker check that fails skips this run alone.
+    on_rejections = "rejection" in auto_reason
+    if auto_activate and on_rejections:
         safety.activate_kill_switch(settings.kill_switch_path, auto_reason)
         print(f"{RED}{BOLD}*** KILL SWITCH AUTO-ACTIVATED ***{RESET}")
+    if auto_activate:
         print(f"{RED}    {auto_reason}{RESET}")
-        print(f"{YELLOW}    evaluating only, no orders will be sent{RESET}\n")
+        print(f"{YELLOW}    evaluating only, no orders will be sent this run{RESET}\n")
         dry_run = True
 
     async with httpx.AsyncClient() as client:
@@ -380,11 +383,19 @@ async def main(
             # Capture session start equity for the daily-loss guard when
             # SCANNER_SESSION_START_EQUITY is not set, so a drawdown that
             # happened before this process started can be detected.
-            if settings.session_start_equity <= 0:
+            # Once a day, at the first run: re-capturing every 30 minutes (until 2026-11-01)
+            # moved the baseline with the account, so the 3% daily-loss guard could never trip.
+            if settings.session_start_equity <= 0 and not safety.load_session_equity():
                 safety.capture_session_equity(account.equity)
                 print(f"{DIM}session start equity captured: {account.equity:,.2f}{RESET}")
             open_market = await broker.market_open()
             held = await broker.held_symbols()
+            # The sweep's own positions (its smc- buys). Since it became one 20% book among
+            # several (2026-11-02), its slots and its per-sector cap count only these, as its
+            # ghost's do; `held` (every position) still stops it buying a name another book holds.
+            own = frozenset(s for s, who in ownership.owners(await broker._get(
+                "/v2/orders", status="all", limit=500, nested="true")).items()
+                if who == ownership.SMC and s in held)
             # GTC brackets keep the stop alive overnight, and an unfilled
             # ENTRY alive with it. A limit resting past its freshness window
             # would fill on a setup the screen no longer produces, so it is
@@ -445,7 +456,7 @@ async def main(
             )
             gate = check_account(
                 account.equity, session_start,
-                len(held), limits, market_open=open_market,
+                len(own), limits, market_open=open_market,
                 account_status=account.status, account_blocked=account.blocked,
             )
             if not gate:
@@ -493,7 +504,7 @@ async def main(
                       f"(~one session) rather than {policy.fresh_bars}{RESET}")
         else:
             account = None
-            held = pending = frozenset()
+            held = pending = own = frozenset()
             print(f"{YELLOW}dry run — scanning only, no orders will be sent{RESET}")
 
         ex_dividends = {}
@@ -546,14 +557,9 @@ async def main(
         universe = await composite.load_universe(client, INDEXES[index])
         symbols = tuple(m.symbol for m in universe)
         sector_of = {m.symbol: m.sector for m in universe}
-        # CLAMPED TO THE OPERATOR'S CORE LIST (window 16, 2026-10-06): when
-        # watchlists/core.txt names any stocks, they are the ONLY names scanned.
-        # The index universe is still loaded for sector context.
-        core = _core_list()
-        if core:
-            symbols = core
-            print(f"{YELLOW}CORE LIST: scanning only {len(core)} hand-picked name(s): "
-                  f"{', '.join(core)}{RESET}")
+        # The full index, as the ghost that earned its return back scans it (2026-11-02). The
+        # 2026-10-06 clamp to watchlists/core.txt's 18 hand-picked names is removed: that list
+        # was the old picks book's, and the ghost's +14.1R was made on the whole S&P 500.
         range_ = max_range(minutes)
         print(f"{DIM}scanning {len(symbols)} symbols on {minutes}m bars{RESET}")
         print(f"{DIM}policy: {policy.describe()}{RESET}")
@@ -727,7 +733,7 @@ async def main(
         # gates itself, so every refusal is recorded exactly as before and this
         # cannot alter a decision. `rankable` only decides what is worth
         # forming an opinion about.
-        room = limits.max_positions - len(held)
+        room = limits.max_positions - len(own)
         rankable = ([row for row in candidates
                      if check_symbol(row[0].symbol, held, pending)][:show]
                     if room > 0 else [])
@@ -968,113 +974,95 @@ async def main(
             # chips/AI hardware; eight open at once is one bet with 8% at risk,
             # not eight bets. 0 disables.
             sector_gate = sector_concentration(
-                held, sector_of, setup.symbol, policy.max_per_sector
+                own, sector_of, setup.symbol, policy.max_per_sector
             )
             if not sector_gate:
                 print(f"  {RED}{setup.symbol:<6} SKIPPED — {sector_gate.reason}{RESET}")
                 record(CONFIRM, setup.symbol, sector_gate.reason)
                 continue
 
-            # Take-profit ladder: submit entry + per-tier sells + stop separately.
-            # Single-target setups still use bracket_payload.
-            if setup.targets:
-                # Entry limit order (full shares)
-                entry_payload = entry_payload(
-                    setup.symbol, sizing.shares, setup.entry_price, at,
-                    entry_offset_pct=policy.entry_limit_offset_pct)
-                entry_payload["client_order_id"] = f"smc-{setup.symbol}-{int(at.timestamp())}"
+            # One target is one bracket. A ladder is only for a setup that has tiers.
+            # Reading setup.targets here crashed the scan on 2026-11-02.
+            tiers = tuple(getattr(setup, "targets", None) or ())
+            payloads = order_payloads(
+                setup, sizing, at, entry_offset_pct=policy.entry_limit_offset_pct)
+            intent = TradeIntent(
+                symbol=setup.symbol,
+                action="buy",
+                strategy="smc",
+                trigger_at=at,
+                entry_price=setup.entry_price,
+                stop_price=setup.stop_price,
+                target_price=0.0 if tiers else setup.target_price,
+                shares=sizing.shares,
+                risk_dollars=sizing.risk_dollars,
+                position_dollars=sizing.position_dollars,
+                reward_risk=0.0 if tiers else setup.reward_risk,
+                paper=True,
+                dry_run=dry_run,
+                client_order_id=payloads[0]["client_order_id"],
+                rsi_gate_passed=rsi_shadow,
+                priority_rank=ranks.get(setup.symbol, 0),
+                priority_score=round(priority(setup), 2),
+                llm_conviction=llm_order[setup.symbol].conviction if setup.symbol in llm_order else "",
+                llm_concern=llm_order[setup.symbol].concern if setup.symbol in llm_order else "",
+                llm_driver=llm_order[setup.symbol].driver if setup.symbol in llm_order else "",
+                sector=sector_of.get(setup.symbol, ""),
+                dollar_volume=round(volumes_by_symbol.get(setup.symbol, 0.0), 2),
+                liquidity_tier=_liquidity_tier(volumes_by_symbol.get(setup.symbol, 0.0)),
+                llm_rank=llm_rank.get(setup.symbol, 0),
+                trigger_slot=session_slot(at),
+                trigger_weekday=at.strftime("%a"),
+                targets=tiers,
+            )
+            append_event(settings.audit_log_path, AuditEvent(
+                event="trade_intent", at=datetime.now().astimezone(),
+                symbol=setup.symbol, intent=intent,
+                stage=TRADE if not dry_run else WATCH,
+                policy=policy.fingerprint, build=build_id(),
+            ))
+            if tiers:
+                shown = ", ".join(
+                    f"{t.label}@{t.target_price:.2f}({t.pct_of_shares:.0%})" for t in tiers)
+                target_text = f"targets {CYAN}{shown}{RESET}"
+            else:
+                target_text = f"target {CYAN}{setup.target_price:,.2f}{RESET}"
+            print(f"  {BOLD}{setup.symbol:<6}{RESET} {sizing.shares:>5} sh @ "
+                  f"{setup.entry_price:>9,.2f}   "
+                  f"stop {RED}{setup.stop_price:,.2f}{RESET}   "
+                  f"{target_text}")
+            print(f"         {DIM}risking {sizing.risk_dollars:,.2f} "
+                  f"({sizing.risk_dollars / equity * 100:.2f}% of "
+                  f"{'swing sleeve' if policy.swing_allocation_pct < 100 else 'equity'}), "
+                  f"position {sizing.position_dollars:,.2f}, "
+                  f"limited by {sizing.limited_by}{RESET}")
 
-                # Take-profit limit sells for each tier
-                remaining_shares = sizing.shares
-                tp_payloads = []
-                for tier in setup.targets:
-                    tier_shares = max(1, int(sizing.shares * tier.pct_of_shares))
-                    remaining_shares -= tier_shares
-                    tp_payloads.append(take_profit_payload(
-                        setup.symbol, tier_shares, tier.target_price,
-                        tier.label, at, entry_payload["client_order_id"]))
-
-                # Stop loss for remaining shares after all tiers
-                stop_shares = max(1, remaining_shares)
-                sl_payload = stop_payload(
-                    setup.symbol, stop_shares, setup.stop_price, at,
-                    entry_payload["client_order_id"])
-
-                intent = TradeIntent(
-                    symbol=setup.symbol,
-                    action="buy",
-                    strategy="smc",
-                    trigger_at=at,
-                    entry_price=setup.entry_price,
-                    stop_price=setup.stop_price,
-                    target_price=0.0,  # multi-target: no single target
-                    shares=sizing.shares,
-                    risk_dollars=sizing.risk_dollars,
-                    position_dollars=sizing.position_dollars,
-                    reward_risk=0.0,
-                    paper=True,
-                    dry_run=dry_run,
-                    client_order_id=entry_payload["client_order_id"],
-                    rsi_gate_passed=rsi_shadow,
-                    priority_rank=ranks.get(setup.symbol, 0),
-                    priority_score=round(priority(setup), 2),
-                    llm_conviction=llm_order[setup.symbol].conviction if setup.symbol in llm_order else "",
-                    llm_concern=llm_order[setup.symbol].concern if setup.symbol in llm_order else "",
-                    llm_driver=llm_order[setup.symbol].driver if setup.symbol in llm_order else "",
-                    sector=sector_of.get(setup.symbol, ""),
-                    dollar_volume=round(volumes_by_symbol.get(setup.symbol, 0.0), 2),
-                    liquidity_tier=_liquidity_tier(volumes_by_symbol.get(setup.symbol, 0.0)),
-                    llm_rank=llm_rank.get(setup.symbol, 0),
-                    trigger_slot=session_slot(at),
-                    trigger_weekday=at.strftime("%a"),
-                    targets=setup.targets,
-                )
+            if dry_run:
+                continue
+            try:
+                order = await broker.submit(payloads[0])
+                order_id = str(order.get("id", ""))
+                sent += 1
+                safety.reset_rejections(settings.kill_switch_path)
+                for extra in payloads[1:]:
+                    await broker.submit(extra)
                 append_event(settings.audit_log_path, AuditEvent(
-                    event="trade_intent", at=datetime.now().astimezone(),
+                    event="order_submitted", at=datetime.now().astimezone(),
                     symbol=setup.symbol, intent=intent,
-                    stage=TRADE if not dry_run else WATCH,
-                    policy=policy.fingerprint, build=build_id(),
+                    order_id=order_id,
+                    request_id=broker.last_request_id,
+                    stage=TRADE, policy=policy.fingerprint, build=build_id(),
                 ))
-                print(f"  {BOLD}{setup.symbol:<6}{RESET} {sizing.shares:>5} sh @ "
-                      f"{setup.entry_price:>9,.2f}   "
-                      f"stop {RED}{setup.stop_price:,.2f}{RESET}   "
-                      f"targets {CYAN}{', '.join(f'{t.label}@{t.target_price:.2f}({t.pct_of_shares:.0%})' for t in setup.targets)}{RESET}")
-                print(f"         {DIM}risking {sizing.risk_dollars:,.2f} "
-                      f"({sizing.risk_dollars / equity * 100:.2f}% of "
-                      f"{'swing sleeve' if policy.swing_allocation_pct < 100 else 'equity'}), "
-                      f"position {sizing.position_dollars:,.2f}, "
-                      f"limited by {sizing.limited_by}{RESET}")
-
-                if dry_run:
-                    continue
-                try:
-                    # Submit entry first
-                    order = await broker.submit(entry_payload)
-                    order_id = str(order.get("id", ""))
-                    sent += 1
-                    safety.reset_rejections(settings.kill_switch_path)
-                    # Submit take-profit tiers
-                    for tp in tp_payloads:
-                        await broker.submit(tp)
-                    # Submit stop loss for remaining shares
-                    await broker.submit(sl_payload)
-                    append_event(settings.audit_log_path, AuditEvent(
-                        event="order_submitted", at=datetime.now().astimezone(),
-                        symbol=setup.symbol, intent=intent,
-                        order_id=order_id,
-                        request_id=broker.last_request_id,
-                        stage=TRADE, policy=policy.fingerprint, build=build_id(),
-                    ))
-                    print(f"         {GREEN}submitted{RESET} {DIM}id {order_id}{RESET}")
-                except BrokerError as exc:
-                    rej = safety.record_rejection(settings.kill_switch_path)
-                    append_event(settings.audit_log_path, AuditEvent(
-                        event="order_rejected", at=datetime.now().astimezone(),
-                        symbol=setup.symbol, intent=intent,
-                        request_id=broker.last_request_id, reason=str(exc),
-                        stage=TRADE, policy=policy.fingerprint, build=build_id(),
-                    ))
-                    print(f"         {RED}not submitted: {exc}{RESET}"
+                print(f"         {GREEN}submitted{RESET} {DIM}id {order_id}{RESET}")
+            except BrokerError as exc:
+                rej = safety.record_rejection(settings.kill_switch_path)
+                append_event(settings.audit_log_path, AuditEvent(
+                    event="order_rejected", at=datetime.now().astimezone(),
+                    symbol=setup.symbol, intent=intent,
+                    request_id=broker.last_request_id, reason=str(exc),
+                    stage=TRADE, policy=policy.fingerprint, build=build_id(),
+                ))
+                print(f"         {RED}not submitted: {exc}{RESET}"
                       f" {DIM}({rej} consecutive rejection(s)){RESET}")
 
         if not dry_run:

@@ -10,6 +10,7 @@ made -- and an alert is written either way.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from scanner.execution import protection as pr
 
@@ -44,6 +45,53 @@ def test_exit_is_a_plain_market_sell_for_the_naked_shares_only():
     assert payload["client_order_id"].startswith("protect-close-INTC-")
 
 
+def test_a_working_close_covers_those_shares():
+    # 2026-11-02: the open sale was working and protect re-armed the same
+    # shares. The broker answered 403, and the log called them still naked.
+    assert pr.uncovered(5, 5) == 0
+    assert pr.uncovered(6, 0) == 6
+    assert pr.uncovered(5, 2) == 3
+    assert pr.uncovered(4, 9) == 0
+
+
+def test_a_covered_book_removes_the_old_alert(tmp_path):
+    stale = tmp_path / "PROTECTION_ALERT.txt"
+    stale.write_text("SPY and QQQ, from before their stops were armed", encoding="utf-8")
+    assert pr.clear_alert([tmp_path]) == []
+    assert not stale.exists()
+    assert pr.clear_alert([tmp_path]) == []
+
+
+def test_a_locked_note_is_reported(tmp_path, monkeypatch):
+    note = tmp_path / "PROTECTION_ALERT.txt"
+    note.write_text("open in an editor", encoding="utf-8")
+
+    def refuse(self, missing_ok=False):
+        raise PermissionError(13, "in use", str(self))
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    stuck = pr.clear_alert([tmp_path])
+    assert len(stuck) == 1
+    assert str(note) in stuck[0] and "in use" in stuck[0]
+    assert note.read_text(encoding="utf-8") == "open in an editor"
+
+
+def test_a_partial_fill_counts_only_the_shares_still_working():
+    # qty stays at the original size while the position shrinks. Counting qty
+    # treats the filled shares as still covered, and the rest get no stop.
+    orders = [{
+        "symbol": "SPY", "side": "sell", "type": "market",
+        "status": "partially_filled", "qty": "60", "filled_qty": "40",
+    }]
+    assert pr.closing_shares(orders) == {"SPY": 20}
+    assert pr.uncovered(60, 20) == 40
+    done = [{
+        "symbol": "SPY", "side": "sell", "type": "market",
+        "status": "partially_filled", "qty": "20", "filled_qty": "20",
+    }]
+    assert pr.closing_shares(done) == {}
+
+
 def test_working_market_sell_counts_as_already_closing():
     orders = [
         {"symbol": "INTC", "side": "sell", "type": "market", "status": "accepted", "qty": "169"},
@@ -61,4 +109,5 @@ def test_alert_names_every_position_and_what_was_done():
                          when="2026-10-05 05:33 AKDT")
     assert "INTC" in text and "169" in text and "sell sent" in text
     assert "XYZ" in text and "no stop on record" in text
+    assert "until a later pass" in text
     assert "2026-10-05 05:33" in text

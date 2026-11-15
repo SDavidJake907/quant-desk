@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from scanner.entity import build_entity, mentions_entity, prefilter
+from scanner.entity import build_entity, for_symbol, mentions_entity, prefilter
 from scanner.models import NewsItem
 
 NVDA = build_entity("NVDA", 1045810, "NVIDIA CORP")
@@ -32,6 +32,12 @@ def _item(title: str, summary: str = "") -> NewsItem:
 def test_strips_corporate_suffixes_from_aliases():
     assert "nvidia" in NVDA.aliases
     assert "advanced micro devices" in AMD.aliases
+    lly = build_entity("LLY", 59478, "ELI LILLY & Co")
+    assert "eli lilly" in lly.aliases
+    assert mentions_entity("Eli Lilly raises its outlook", lly)
+    iex = build_entity("IEX", 832101, "IDEX CORP /DE/")
+    assert mentions_entity("IDEX raises guidance", iex)
+    assert not mentions_entity("Indian Energy Exchange Reports Q2 FY27 Financial Results", iex)
 
 
 def test_pads_cik_for_edgar():
@@ -72,6 +78,29 @@ def test_prefilter_keeps_only_named_items():
     kept = prefilter(items, NVDA)
     assert len(kept) == 2
     assert all("ovavax" not in i.title for i in kept)
+
+
+def test_for_symbol_is_newest_first_and_drops_another_company():
+    iex = build_entity("IEX", 1, "IDEX CORP")
+    items = [
+        {"id": 1, "created_at": "2026-10-30T12:00:00Z", "symbols": ["IEX"],
+         "headline": "Indian Energy Exchange Reports Q2"},
+        {"id": 2, "created_at": "2026-10-29T12:00:00Z", "symbols": ["IEX"],
+         "headline": "IDEX names a new plant"},
+        {"id": 3, "created_at": "2026-10-31T12:00:00Z", "symbols": ["IEX"],
+         "headline": "IDEX updates its outlook"},
+    ]
+    assert [item["id"] for item in for_symbol(items, "IEX", iex)] == [3, 2]
+    spy = for_symbol(items[:1], "IEX", None)
+    assert [item["id"] for item in spy] == [1]
+    mrk = build_entity("MRK", 310158, "Merck & Co., Inc.")
+    other = [{"id": 9, "created_at": "2026-10-30T21:01:00Z", "symbols": ["MRK"],
+              "headline": "MilliporeSigma Marks 10th Anniversary",
+              "summary": "MilliporeSigma, the life science business of Merck KGaA, celebrates."}]
+    own = [{"id": 8, "created_at": "2026-10-30T22:48:00Z", "symbols": ["MRK"],
+            "headline": "JP Morgan Maintains Overweight on Merck & Co, Raises Price Target to $175"}]
+    assert for_symbol(other, "MRK", mrk) == []
+    assert [item["id"] for item in for_symbol(own, "MRK", mrk)] == [8]
 
 
 def test_prefilter_is_immutable_and_returns_new_tuple():

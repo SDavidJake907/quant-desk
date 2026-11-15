@@ -95,17 +95,18 @@ async def main(submit: bool) -> int:
 
         def price_ok(s: str) -> bool:
             c = bars[s].closes
+            month = sat.month_return(c)
             return (sat.momentum_top(s, mom) and c[-1] / c[-127] > 1
-                    and c[-1] > sum(c[-50:]) / 50)
+                    and c[-1] > sum(c[-50:]) / 50 and month is not None and month > 0)
 
         candidates = [r for r in rules_pick.ranked(rows, exclude=taken) if price_ok(r.symbol)]
         print(f"  {len(rows)} of {len(sectors)} S&P 600 names pass ${POLICY.small_min_price:g}+ and "
               f"${POLICY.small_min_dollar_volume / 1e6:g}M a day; {len(candidates)} pass momentum / "
-              f"6-month / 50-day: {[r.symbol for r in candidates[:10]]}")
+              f"6-month / 50-day / last month: {[r.symbol for r in candidates[:10]]}")
         if not candidates:
             return 0
         today = date.today()
-        found, failed = await event_calendar.upcoming_earnings(
+        found, failed = await event_calendar.with_moomoo(
             frozenset(r.symbol for r in candidates), client, horizon=sat.EARNINGS_BUFFER_DAYS + 3, today=today)
         sold = sold_recently(read_rows(settings.audit_log_path),
                              datetime.now().astimezone() - timedelta(days=sat.REBUY_LOOKBACK_DAYS))
@@ -117,6 +118,7 @@ async def main(submit: bool) -> int:
             return sat.buy_refusal(
                 gate=gate, gate_name=POLICY.small_gate_symbol, top_momentum=sat.momentum_top(row.symbol, mom),
                 ret_6m=(c[-1] / c[-127] - 1) * 100, above_50d=c[-1] > sum(c[-50:]) / 50,
+                ret_1m=sat.month_return(c),
                 earnings_in_days=(e.on - today).days if e else None, sector=row.sector,
                 held_sectors=held_sectors, sold_recently=row.symbol in sold,
                 new_20d_high=sat.new_closing_high(c))

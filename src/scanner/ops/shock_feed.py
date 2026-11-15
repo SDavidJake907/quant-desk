@@ -74,7 +74,7 @@ async def reporting_bellwethers(client: httpx.AsyncClient, broker, today: date) 
         days = await broker._get("/v2/calendar", start=(today + timedelta(days=1)).isoformat(),
                                  end=(today + timedelta(days=7)).isoformat())
         nxt = date.fromisoformat(days[0]["date"]) if days else today + timedelta(days=1)
-        found, failed = await event_calendar.upcoming_earnings(frozenset(sa.BELLWETHERS), client,
+        found, failed = await event_calendar.with_moomoo(frozenset(sa.BELLWETHERS), client,
                                                                horizon=(nxt - today).days + 1, today=today)
     except Exception:                                          # noqa: BLE001
         return []

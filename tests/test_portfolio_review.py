@@ -6,6 +6,8 @@ rows and broker records, and that it never raises on missing data.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from scanner.execution.portfolio_review import (
     BookStats,
     Position,
@@ -19,11 +21,16 @@ from scanner.execution.portfolio_review import (
 )
 
 
+def _stamp(days_ago: int = 0) -> str:
+    """A real timestamp relative to now. Fixed dates age out of the 9-day window."""
+    return (datetime.now().astimezone() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+
+
 def _row(event: str, symbol: str = "", reason: str = "", at: str | None = None,
          intent: dict | None = None, outcome: dict | None = None) -> dict:
     return {
         "event": event,
-        "at": at or "2026-10-15T05:33:00-08:00",
+        "at": at or _stamp(),
         "symbol": symbol,
         "reason": reason,
         "intent": intent or {},
@@ -172,13 +179,14 @@ def test_build_review_sector_exposure():
 
 def test_build_review_recent_activity_window():
     # An entry from today should appear; one from 10 days ago should not.
+    # The window is 3 sessions x 3 days = 9 days (portfolio_review.LOOKBACK_SESSIONS).
     rows = [
         _row("order_submitted", "NVDA",
              intent=_intent("NVDA", 100.0, 95.0, 110.0),
-             at="2026-10-15T05:33:00-08:00"),
+             at=_stamp(0)),
         _row("order_submitted", "AAPL",
              intent=_intent("AAPL", 100.0, 95.0, 110.0),
-             at="2026-10-05T05:33:00-08:00"),
+             at=_stamp(10)),
     ]
     review = build_review(
         rows=rows, positions=[], orders=[], account=_account(),

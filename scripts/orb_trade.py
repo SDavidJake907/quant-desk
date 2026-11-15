@@ -293,7 +293,10 @@ async def main(dry: bool) -> int:
             say(f"no buys -- {gate.reason}")
             return 0
         sleeve = equity * POLICY.orb_allocation_pct / 100
-        deployed = sum(abs(float(p.get("market_value") or 0)) for p in mine) + sum(
+        if sleeve <= 0:
+            say("ORB is off (0% of equity from 2026-11-02, its 10% to the sweep scanner): no buys")
+            return 0
+        deployed =sum(abs(float(p.get("market_value") or 0)) for p in mine) + sum(
             float(o.get("qty") or 0) * float(o.get("limit_price") or 0) for o in pending)
         room = max(0.0, min(float(raw.get("buying_power") or 0), sleeve - deployed))
         five = await alpaca_bars.bars([r.symbol for r in watch], client, timeframe="5Min",

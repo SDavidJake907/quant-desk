@@ -59,6 +59,21 @@ def test_buyable_pool_filters_and_adds_50d_and_earnings(monkeypatch):
     assert "earnings none in" in gp.line(shown[0])
 
 
+def test_a_name_above_its_50_day_but_down_this_month_is_refused():
+    """12-1 skips the last month, and the 50-day check still passes on a shallow fade.
+    That mixed case is the downward month the pool used to buy."""
+    rise = [100.0 + i for i in range(150)]
+    fade = [249.0 - i * 0.4 for i in range(1, 22)]
+    closes = rise + fade
+    assert closes[-1] > sum(closes[-50:]) / 50
+    assert closes[-1] / closes[-22] - 1 < 0
+    assert closes[-1] / closes[-127] - 1 > 0
+    mom = {"ROLL": 90.0, "B": 10.0, "C": 1.0}
+    why = sf.price_refusal("ROLL", closes, mom=mom, segment={}, g=G, earnings_in_days=None)
+    assert why is not None and "last month" in why
+    assert "50-day" not in why and "6-month" not in why
+
+
 def test_old_pool_lines_and_files_unchanged():
     r = row("AAA", 90.0)
     assert "vs 50d" not in gp.line(r) and "earnings" not in gp.line(r)

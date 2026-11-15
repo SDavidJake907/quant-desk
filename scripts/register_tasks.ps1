@@ -22,7 +22,7 @@ $tasks = @(
     "stock-scanner-data",
     "stock-scanner-flatten",
     "stock-scanner-outcomes",
-    "stock-scanner-gemma",
+    "stock-scanner-picks",
     "stock-scanner-peakwatch"
 )
 
@@ -40,8 +40,9 @@ $tasks = @(
 # Retired 2026-10-26 (operator: "stop Gemma from picking ... strip some of the repo down"; FREEZE):
 #   every Gemma / LLM task (gemma-ext, gemma-sunday, gemma-review, gemma-portfolio, hindsight,
 #   monitor, news, weekahead, ideas, leaders, journal, weekly, monday, factors), the research
-#   data collectors (extended, extras) and the momentum paper rebalance. stock-scanner-gemma
-#   now runs the rules book's 9:45 pick (scripts/rules_pick.py).
+#   data collectors (extended, extras) and the momentum paper rebalance. The 05:45
+#   pick task was renamed to stock-scanner-picks on 2026-11-10. This script disables
+#   the old name. It does not delete it.
 $retired = @("stock-scanner-sector", "stock-scanner-advisor-live",
     "stock-scanner-extsync", "stock-scanner-advisor-pre", "stock-scanner-signals",
     "stock-scanner-oneshot-fast-exit-1023", "stock-scanner-oneshot-picks-exit-1026",
@@ -91,7 +92,7 @@ $scanTrigger.Repetition = $repeating.Repetition
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 25) -MultipleInstances IgnoreNew
 
 $scanAction = New-ScheduledTaskAction -Execute "$root\scripts\scheduled_scan.bat" -WorkingDirectory $root
-Register-ScheduledTask -TaskName "stock-scanner-scan" -Trigger $scanTrigger -Action $scanAction -Settings $settings -Description "Safety pass every 30 min, US market hours: protect.py re-arms stops, 60-bar limit on scanner positions (05:33-12:03 AK). Scanner entries paused." -Force | Out-Null
+Register-ScheduledTask -TaskName "stock-scanner-scan" -Trigger $scanTrigger -Action $scanAction -Settings $settings -Description "Safety pass every 30 min, US market hours: sell-at-open, protect.py re-arms stops, 60-bar limit, then the sweep scanner on its 20% sleeve (05:33-12:03 AK)." -Force | Out-Null
 Write-Output "registered stock-scanner-scan   05:33-12:03 AK, every 30 min"
 
 # --- off-hours data collection --------------------------------------------
@@ -160,16 +161,19 @@ Write-Output "registered stock-scanner-outcomes 13:30 AK daily"
 
 $weekdays = @("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 
-# --- Gemma's book: the junior trader (WORKLIST §42) -------------------------
-# 05:45 AK weekdays: after the 05:33 safety pass has placed the picks list's
-# orders (so those names are visibly taken) and after the 03:30 ratings have
-# freed the GPU. Gemma names up to 5 stocks from core.txt; bookorders prices,
-# sizes, stops and sends on its 10% sleeve. Market closed -> nothing sent.
+# --- Rules and small-cap picks ------------------------------------------------
+# 05:45 AK weekdays. scheduled_gemma.bat runs rules_pick.py, then small_pick.py.
+# No model. Peak watch sends the queued buys. The gem- order prefix stays.
+# The old task name stock-scanner-gemma is disabled below, not deleted.
 $gemTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $weekdays -At 5:45AM
 $gemSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
 $gemAction = New-ScheduledTaskAction -Execute "$root\scripts\scheduled_gemma.bat" -WorkingDirectory $root
-Register-ScheduledTask -TaskName "stock-scanner-gemma" -Trigger $gemTrigger -Action $gemAction -Settings $gemSettings -Description "Gemma's book: morning decision on core.txt names, real paper orders on a 10% sleeve (05:45 AK weekdays)" -Force | Out-Null
-Write-Output "registered stock-scanner-gemma   05:45 AK weekdays"
+Register-ScheduledTask -TaskName "stock-scanner-picks" -Trigger $gemTrigger -Action $gemAction -Settings $gemSettings -Description "Rules and small-cap picks at 05:45 AK weekdays. Queues buys. Peak watch sends them. No model." -Force | Out-Null
+Write-Output "registered stock-scanner-picks   05:45 AK weekdays"
+try {
+    Disable-ScheduledTask -TaskName "stock-scanner-gemma" -ErrorAction Stop | Out-Null
+    Write-Output "disabled stock-scanner-gemma"
+} catch { }
 
 # --- 24/5 (operator 2026-10-22) ------------------------------------------------
 # Around the clock; each script asks the broker's clock which session it is and

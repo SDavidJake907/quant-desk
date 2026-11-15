@@ -38,3 +38,16 @@ def test_queue_item_uses_the_plan_defaults_and_says_why():
     item = rp.queue_item(_row("DDD", 60.0), rank=2, passing=14)
     assert item["stop"] == "normal" and item["target"] == "none" and item["size"] == "normal"
     assert "#2 of 14" in item["reason"] and "+60%" in item["reason"]
+
+
+def test_the_rules_book_ranks_the_10_month_to_7_month_window_and_skips_a_missing_one():
+    scores = {"BBB": 12.0, "AAA": 40.0, "DDD": None, "CCC": 1.0}
+    assert [r.symbol for r in rp.momentum_ranked(ROWS, scores)] == ["AAA", "BBB", "CCC"]
+    assert [r.symbol for r in rp.momentum_ranked(ROWS, scores, exclude={"AAA"})] == ["BBB", "CCC"]
+
+
+def test_a_rotation_queue_item_names_the_window_and_carries_no_stop():
+    item = rp.rotation_item(_row("AAA", 40.0), rank=1, passing=10, momentum=18.2)
+    assert item["rotation"] is True
+    assert item["stop"] == "none" and item["target"] == "none"
+    assert "10 months ago to 7 months ago" in item["reason"] and "+18%" in item["reason"]

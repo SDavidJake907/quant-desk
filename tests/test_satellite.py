@@ -7,7 +7,7 @@ import pytest
 from scanner.execution import satellite as sat
 
 OK = dict(gate=True, gate_name="big caps", top_momentum=True, ret_6m=12.0, above_50d=True,
-          earnings_in_days=None, sector="Tech", held_sectors={}, sold_recently=False,
+          ret_1m=5.0, earnings_in_days=None, sector="Tech", held_sectors={}, sold_recently=False,
           new_20d_high=False)
 
 
@@ -21,6 +21,9 @@ def test_a_clean_buy_passes():
     ({"top_momentum": False}, "top third"),
     ({"ret_6m": -1.0}, "6-month"),
     ({"above_50d": False}, "50-day"),
+    ({"ret_1m": -1.0}, "last month"),
+    ({"ret_1m": 0.0}, "last month"),
+    ({"ret_1m": None}, "last month"),
     ({"earnings_in_days": 4}, "earnings in 4"),
     ({"held_sectors": {"Tech": 2}}, "already 2 in Tech"),
     ({"sold_recently": True}, "re-buy only"),
@@ -33,6 +36,86 @@ def test_rebuy_allowed_on_a_new_20_day_high_and_unknown_sector_uncapped():
     assert sat.buy_refusal(**{**OK, "sold_recently": True, "new_20d_high": True}) is None
     assert sat.buy_refusal(**{**OK, "sector": "unknown", "held_sectors": {"unknown": 5}}) is None
     assert sat.buy_refusal(**{**OK, "earnings_in_days": 6}) is None
+
+
+def test_month_return_is_the_last_21_sessions():
+    assert sat.month_return([10.0] * 21) is None
+    assert sat.month_return([10.0] * 21 + [11.0]) == pytest.approx(10.0)
+    down = [100.0] * 30
+    down[-1] = 90.0
+    assert sat.month_return(down) == pytest.approx(-10.0)
+
+
+def test_momentum_window_is_the_move_from_10_months_ago_to_7_months_ago():
+    """21 sessions a month. The last bar reads closes[63] against closes[0] on a 211-bar series,
+    the same ends as the lab's momentum_series(long=10, skip=7)."""
+    closes = [1.0] * 211
+    closes[0] = 100.0
+    closes[21 * 3] = 110.0
+    assert sat.momentum_window(closes) == pytest.approx(10.0)
+    assert sat.momentum_window(closes[:210]) is None
+    flat = [0.0] + [1.0] * 210
+    assert sat.momentum_window(flat) is None
+
+
+def test_market_extended_is_strictly_more_than_3_percent_above_the_20_day():
+    """The average includes the last close. A reading that is not over 3% does not sell."""
+    under = [100.0] * 19 + [103.0]
+    over = [100.0] * 19 + [104.0]
+    assert (under[-1] / (sum(under) / 20) - 1) * 100 < sat.RULES_EXTENSION_PCT
+    assert (over[-1] / (sum(over) / 20) - 1) * 100 > sat.RULES_EXTENSION_PCT
+    assert sat.market_extended(under) is False
+    assert sat.market_extended(over) is True
+    assert sat.market_extended([100.0] * 19) is None
+    assert sat.market_extended([0.0] * 20) is None
+
+
+def test_the_rules_book_refills_every_fifth_weekday_from_the_change():
+    assert sat.rules_rebalance_due(sat.RULES_BOOK_FROM) is True
+    assert sat.rules_rebalance_due(date(2026, 11, 4)) is False
+    assert sat.rules_rebalance_due(date(2026, 11, 10)) is True
+    assert sat.rules_rebalance_due(date(2026, 11, 2)) is False
+
+
+def test_a_rules_position_opened_before_the_change_keeps_its_stop():
+    assert sat.rules_rotation(None) is False
+    assert sat.rules_rotation(date(2026, 11, 2)) is False
+    assert sat.rules_rotation(sat.RULES_BOOK_FROM) is True
+    assert sat.rules_book_has_no_stop("gemma", sat.RULES_BOOK_FROM) is False
+    assert sat.rules_book_has_no_stop("Rules book", date(2026, 11, 2)) is False
+    assert sat.rules_book_has_no_stop("small", sat.RULES_BOOK_FROM) is False
+
+
+def test_the_10_7_stop_is_two_and_a_half_atr_and_never_more_than_8_percent():
+    assert sat.rotation_stop(100, 2) == pytest.approx(95)       # 2.5 x 2% sits inside the cap
+    assert sat.rotation_stop(100, 4) == pytest.approx(92)       # 2.5 x 4% is wider than 8%
+    assert sat.rotation_stop(100, 0) == pytest.approx(92)
+
+
+def test_the_10_7_stop_rises_to_half_the_best_close_and_never_falls():
+    # CNC: entry 66.41, best close 76.01, the 8% stop 61.13 rises to 71.21.
+    assert sat.raised_stop(66.41, 76.01, 61.13) == pytest.approx(71.21, abs=0.01)
+    assert sat.raised_stop(100, 110, 92) == pytest.approx(105)
+    assert sat.raised_stop(100, 104, 92) == 92          # a close under +5% leaves the 8% stop
+    assert sat.raised_stop(100, 106, 104) == 104        # a higher stop already working stays
+    assert sat.raised_stop(0, 110, 92) == 92
+
+
+def test_the_new_rules_book_sells_on_the_extension_or_after_15_sessions():
+    assert sat.rules_close_exit(held_days=0, extended=True) is None
+    assert sat.rules_close_exit(held_days=1, extended=True).startswith("market extended")
+    assert sat.rules_close_exit(held_days=14, extended=False) is None
+    assert sat.rules_close_exit(held_days=14, extended=None) is None
+    assert "15" in sat.rules_close_exit(held_days=15, extended=False)
+    assert "15" in sat.rules_close_exit(held_days=15, extended=None)
+    assert sat.rules_close_exit(held_days=15, extended=True).startswith("market extended")
+
+
+def test_a_slot_buy_is_an_equal_slice_and_never_sizes_off_a_stop():
+    assert sat.slot_shares(dollars=1000, room=5000, limit=100) == 10
+    assert sat.slot_shares(dollars=1000, room=150, limit=100) == 1
+    assert sat.slot_shares(dollars=1000, room=50, limit=100) == 0
+    assert sat.slot_shares(dollars=0, room=5000, limit=100) == 0
 
 
 def test_gate_and_new_high():
@@ -128,3 +211,16 @@ def test_profit_lock_keeps_half_of_a_5pct_gain():
     assert sat.close_exit(closes_since_buy=[104.0], price=101.0, **hold) is None          # never +5%: off
     assert sat.close_exit(closes_since_buy=[106.0], price=103.5, **hold) is None          # kept over half
     assert sat.close_exit(closes_since_buy=[106.0], price=102.9, **hold).startswith("profit lock")
+
+
+def test_the_10_7_profit_lock_uses_the_same_floor():
+    """A completed +12% close, then 105, is under the 106 floor. 107 is not."""
+    why = sat.profit_lock_exit(entry=100, closes_since_buy=[112], price=105)
+    assert why is not None and why.startswith("profit lock") and "106.00" in why
+    same = sat.close_exit(entry=100, atr=2, closes_since_buy=[112], price=105, held_days=4,
+                          reports_before_next_session=False)
+    assert same == why
+    assert sat.profit_lock_exit(entry=100, closes_since_buy=[112], price=107) is None
+    assert sat.profit_lock_exit(entry=100, closes_since_buy=[112], price=106) is None      # the floor itself holds
+    assert sat.profit_lock_exit(entry=100, closes_since_buy=[103], price=100) is None      # never +5%
+    assert sat.profit_lock_exit(entry=100, closes_since_buy=[], price=112) is None         # the high is not under itself

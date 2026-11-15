@@ -2,9 +2,10 @@
 
 Operator 2026-10-27: "lets look into penny stocks.. low caps. and make a gate for it %10 of the
 account"; chose S&P 600 members priced $5+, funded from the rules book, IWM above its 200-day as
-the gate. The rules book's checks (satellite.buy_refusal: top-third 12-1 momentum within this pool,
-6-month return up, above the 50-day, no earnings within the buffer, 2 a sector, the 30-day re-buy
-rule) and its exits (plan_run.exit_pass with the full 2.5 ATR stop). `sml-` order ids.
+the gate. Its checks are satellite.buy_refusal: top-third 12-1 momentum within this pool,
+6-month return up, above the 50-day, up over the last month, no earnings within the buffer, 2 a
+sector, the 30-day re-buy rule. Its exits are plan_run.exit_pass with the full 2.5 ATR stop.
+`sml-` order ids.
 
 CHOSEN, not measured: S&P 600 momentum beat random by +0.83 pts a 3-month hold, t 1.28, and lost
 to it 2017-2020 (WORKLIST §31). Graded forward against IWM.

@@ -148,7 +148,7 @@ def write_report(scores: list[pc.Score], when: datetime, acted: list[str]) -> No
         verdict = "SELL" if s.sell else ("hold (report only)" if s.book not in POLICY.preclose_sell_strategies else "hold")
         rows.append(f"| {s.symbol} | {s.book} | {(s.price / s.entry - 1) * 100:+.1f}% | " + " | ".join(cells)
                     + f" | {s.confirmed}/4 | {verdict} |")
-    text = (f"Checked {when:%Y-%m-%d %H:%M} ET. The SPY core sells only when under its buy AND 4/4.\n\n"
+    text = (f"Checked {when:%Y-%m-%d %H:%M} ET. The index core (SPY, QQQ) sells only when under its buy AND 4/4.\n\n"
             + "\n".join(rows) + ("\n\n" + "\n".join(f"- {a}" for a in acted) if acted else "") + "\n")
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(text, encoding="utf-8")

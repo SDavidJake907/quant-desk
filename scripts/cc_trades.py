@@ -16,9 +16,9 @@ from collections import defaultdict, deque
 #: The current setup started trading on this day (FREEZE.md 2026-10-26: Gemma stopped picking).
 #: `gem-` buys before it were Gemma's picks, not the rules book's.
 CURRENT_FROM = "2026-10-26"
-PREFIX_BOOK = {"cor": "SPY core", "gem": "Rules book", "sml": "Small caps", "orb": "ORB",
+PREFIX_BOOK = {"cor": "Index core", "gem": "Rules book", "sml": "Small caps", "orb": "ORB",
                "pck": "Picks", "man": "Manual", "mom": "Momentum", "smc": "Sweep"}
-CURRENT_BOOKS = ("SPY core", "Rules book", "Small caps", "ORB")
+CURRENT_BOOKS = ("Index core", "Rules book", "Small caps", "Sweep", "ORB")
 STOP_TYPES = ("stop", "stop_limit", "trailing_stop")
 WORKING = ("new", "accepted", "held", "pending_new", "partially_filled", "accepted_for_bidding")
 HIST_BINS = (-10, -6, -4, -2, -1, 0, 1, 2, 4, 6, 10)

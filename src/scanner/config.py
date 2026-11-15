@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     tradingagents_python: str = str(
         Path.home() / "TradingAgents" / ".venv" / "Scripts" / "python.exe")
 
+    #: X recent search for the position card. Empty means the card says the
+    #: feed is not configured. The token is not an order path.
+    x_bearer_token: str = ""
+
     # Networking
     http_timeout_s: float = 30.0
     llm_timeout_s: float = 300.0

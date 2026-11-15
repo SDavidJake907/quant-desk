@@ -21,11 +21,16 @@ set LOG=logs\scheduled_outcomes.log
 echo. >> "%LOG%"
 echo ===== OUTCOMES %DATE% %TIME% ===== >> "%LOG%"
 
+REM Every step runs. The task fails on the first real failure. The broker
+REM archive's exit is ignored on purpose (a snapshot must not paint the task red).
+set FAIL=0
 ".venv\Scripts\python.exe" "scripts\record_outcomes.py" --write >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 
 REM One scorecard split by strategy: scanner vs manual picks vs momentum
 REM (WORKLIST §37). Read-only.
 ".venv\Scripts\python.exe" "scripts\strategy_scorecard.py" >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 
 REM Second opinions graded: TradingAgents and the Gemma read against the S&P
 REM over 21 sessions (WORKLIST §38). Advisory; read-only.
@@ -35,8 +40,15 @@ REM month's ghost and benchmark paper books, then the standings table.
 REM Ghost-scanner: the paused sweep scanner replayed on paper (no orders),
 REM before the standings that show it.
 ".venv\Scripts\python.exe" "scripts\ghost_scanner.py" >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
+REM The book scorecard (2026-11-01): each book since the fresh start vs its benchmark,
+REM the live sweep vs the ghost just updated above, and the acceleration shadow's grade.
+".venv\Scripts\python.exe" "scripts\book_scorecard.py" >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 ".venv\Scripts\python.exe" "scripts\competition.py" snapshot >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 ".venv\Scripts\python.exe" "scripts\competition.py" standings >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 
 REM Selection skill across the whole menu (WORKLIST §47): Gemma's chosen vs
 REM passed-over names, TradingAgents' rank correlation. Feeds Gemma's scoreboard.
@@ -58,5 +70,7 @@ REM
 REM Dated snapshots, never overwritten, exit code ignored.
 REM The penny watch-list shadow (operator 2026-10-27): records would-buys, grades vs IWM, never orders.
 ".venv\Scripts\python.exe" "scripts\penny_shadow.py" >> "%LOG%" 2>&1
+if errorlevel 1 set FAIL=1
 ".venv\Scripts\python.exe" "scripts\archive_broker.py" >> "%LOG%" 2>&1
-exit /b %errorlevel%
+if %FAIL%==1 exit /b 1
+exit /b 0

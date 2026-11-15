@@ -95,3 +95,38 @@ research; the next evaluation is the end of the following window.
 | 2026-10-05 | Gate 3: real-time SIP feed added | live/backtest data mismatch and Yahoo lag found |
 | 2026-10-05 | −0.024R → −0.059R; Gate 2 fingerprint 9ed12e → 69da22 | −0.024R was ungated and pre-cost; window 15 was re-declared at 69da227b506e |
 | 2026-10-05 | Gate 1 run: FAIL | WORKLIST §30 |
+| 2026-11-10 | Deposit waits for one 10-7 hold. Sweep sleeve 20% → 0% for new buys. No funds moved. | Operator named the list. See the note below. The 2026-10-05 Gate 1 FAIL stays. |
+
+## 2026-11-10 — do not fund yet
+
+The 2026-10-05 gates above still stand, including the Gate 1 FAIL. This note
+does not replace them.
+
+The rules book bought on 2026-11-10 is the book that has to earn a deposit.
+Those names finish one 15-session hold in early December. Judge that sleeve
+against SPY over the same days. A deposit waits on that result. No other sleeve
+is funded in its place.
+
+Scorecard since the 2026-10-30 close, as of 2026-11-10: Rules −$1,602 (−8.27%)
+versus SPY −0.77% (behind 7.51 pts). Small −$203 (−2.09%) versus IWM +0.45%
+(behind 2.54 pts). Sweep −$243 (−1.26%) versus SPY −0.77% (behind 0.49 pts),
+and its ghost is 0 for 11 closed trades (−10.97R). Core −$267 (−1.10%) is
+ahead of SPY/QQQ −1.52% by 0.42 pts and is cash after the 2026-11-05 QQQ stop.
+None of that earns a deposit. QQQ is bought again only on a new 20-day closing high.
+
+New sweep buys are off (`policy.swing_allocation_pct` 0). Open sweep stops
+stay. The books that can still buy are the rules book (20%), small caps (10%),
+and QQQ (25%, only on that re-buy rule). The other 45% is cash.
+
+Starter slice, only after a sleeve beats its benchmark: 25% of the intended
+amount, then 50%, then 100%. Each step waits for 30 further trades whose mean
+R is within one standard error of the measured book. Hard stops stay the ones
+above: daily loss 3%, week loss 6%, drawdown 15% from the funded high.
+
+The account stays on the paper host. Real-time SIP is still a Gate 3 item.
+A read-only check on 2026-11-10 asked Alpaca for SPY's latest SIP quote and
+got HTTP 403, "subscription does not permit querying recent SIP data". The
+same quote on IEX returned HTTP 200. Paper scans stay on the working feed
+(Yahoo for the scans, IEX where the code already asks Alpaca). 
+`scripts/live_readiness_check.py` fails closed with "do not fund" until a SIP
+quote succeeds. That refusal does not move the 10-7 hold onto SIP.

@@ -79,7 +79,7 @@ async def refusals(client: httpx.AsyncClient, buys: Sequence[str], held: Iterabl
     mom = {r.symbol: r.mom_12_1 for r in pool}
     sectors.update({r.symbol: r.sector for r in pool if r.symbol not in sectors})
     bars, _ = await fetch_many(tuple(buys), client, range_="1y")
-    found, failed = await event_calendar.upcoming_earnings(
+    found, failed = await event_calendar.with_moomoo(
         frozenset(buys), client, horizon=sat.EARNINGS_BUFFER_DAYS + 3, today=today)
     sold = sold_recently(read_rows(audit_path), datetime.now().astimezone()
                          - timedelta(days=sat.REBUY_LOOKBACK_DAYS))
@@ -99,6 +99,7 @@ async def refusals(client: httpx.AsyncClient, buys: Sequence[str], held: Iterabl
         why = sat.buy_refusal(
             gate=g.open.get(seg), gate_name=SEGMENT_LABEL[seg], top_momentum=sat.momentum_top(s, mom),
             ret_6m=(c[-1] / c[-127] - 1) * 100, above_50d=c[-1] > sum(c[-50:]) / 50,
+            ret_1m=sat.month_return(c),
             earnings_in_days=(e.on - today).days if e else None, sector=sectors.get(s, "unknown"),
             held_sectors=held_sectors, sold_recently=s in sold, new_20d_high=sat.new_closing_high(c))
         if why:
@@ -112,13 +113,14 @@ async def refusals(client: httpx.AsyncClient, buys: Sequence[str], held: Iterabl
 def price_refusal(symbol: str, closes: Sequence[float], *, mom: dict[str, float | None],
                   segment: dict[str, str], g: Gates, earnings_in_days: int | None) -> str | None:
     """The buy rules that do not depend on her holdings or recent sales: gate, top-third momentum,
-    6-month return, 50-day, earnings. Same rule function as refusals()."""
+    6-month return, 50-day, last month, earnings. Same rule function as refusals()."""
     if len(closes) < 130:
         return "no year of daily bars to check the rules"
     seg = sat.segment_of(symbol, segment)
     return sat.buy_refusal(
         gate=g.open.get(seg), gate_name=SEGMENT_LABEL[seg], top_momentum=sat.momentum_top(symbol, mom),
         ret_6m=(closes[-1] / closes[-127] - 1) * 100, above_50d=closes[-1] > sum(closes[-50:]) / 50,
+        ret_1m=sat.month_return(closes),
         earnings_in_days=earnings_in_days, sector="unknown", held_sectors={}, sold_recently=False,
         new_20d_high=True)
 
@@ -136,7 +138,7 @@ async def buyable_pool(client: httpx.AsyncClient, rows: Sequence[gp.PoolRow], g:
     closes = {s: b.closes for s, b in bars.items() if b is not None}
     pre = [r for r in rows if r.symbol in closes and price_refusal(
         r.symbol, closes[r.symbol], mom=mom, segment=segment, g=g, earnings_in_days=None) is None]
-    found, failed = await event_calendar.upcoming_earnings(
+    found, failed = await event_calendar.with_moomoo(
         frozenset(r.symbol for r in pre), client, horizon=gp.EARNINGS_SHOWN_DAYS, today=today)
     out = []
     for r in pre:

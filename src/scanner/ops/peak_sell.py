@@ -14,9 +14,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from scanner.execution import satellite as sat
 from scanner.signals import indicators as ind
 
 PLAN_FILE = Path("data/gemma/peak_sell_prompt.md")
@@ -46,6 +47,8 @@ class Readings:
     pl_pct: float                   # unrealized P/L on the position, %
     values: Mapping[str, float | None]
     stop_note: str = ""             # the ATR stop: where it is and how far away, for Gemma to see
+    atr_pct: float | None = None    # daily ATR as a percent of the live price; the card's distance
+    session_day: str = ""           # regular session (YYYY-MM-DD) the VWAP and 1-hour readings use
 
     def met(self) -> dict[str, bool | None]:
         """None = the reading is missing (counts as not met)."""
@@ -128,7 +131,8 @@ def readings(symbol: str, pl_pct: float, five: Sequence[Candle], daily_closes: S
     if len(daily_closes) >= 60:
         vals["stc_1d"] = _last(ind.stc(list(daily_closes)))
         vals["pctb_1d"] = pct_b(list(daily_closes))
-    return Readings(symbol=symbol, pl_pct=pl_pct, values=vals)
+    session_day = five[-1][0].date().isoformat() if len(five) >= 60 else ""
+    return Readings(symbol=symbol, pl_pct=pl_pct, values=vals, session_day=session_day)
 
 
 def _fmt(k: str, v: float | None) -> str:
@@ -140,6 +144,9 @@ def _fmt(k: str, v: float | None) -> str:
         return f"{v:+.2f}%"
     if k == "pctb_1d":
         return f"{v:.2f}"
+    # A Schaff of 0.14 is a real low reading. Rounding it to 0 looks like a stuck zero.
+    if k in ("stc_1h", "stc_1d"):
+        return f"{v:.1f}"
     return f"{v:.0f}"
 
 
@@ -196,6 +203,18 @@ def approved(answer: Mapping | None, rs: Sequence[Readings]) -> list[tuple[str, 
     return out
 
 
+def atr_percent_of(atr_pct: float | None, close: float, price: float) -> float | None:
+    """Daily ATR as a percent of `price`.
+
+    `atr_pct` was measured against the official close. The card divides a
+    percent of the live price by this figure, and that quotient is the dollar
+    gap counted in daily ATRs only when both percents use the same price.
+    """
+    if atr_pct is None or not close or not price:
+        return atr_pct
+    return atr_pct * close / price
+
+
 def stop_note(price: float, stop: float | None, atr_pct: float | None) -> str:
     """'stop $12.42, 16.5% below = 2.5 ATR away' -- the protective sell already at the broker."""
     if not stop or not price:
@@ -220,6 +239,17 @@ def becomes_ready(r: Readings) -> bool:
 
 def should_sell(r: Readings, marked: bool) -> bool:
     return marked and r.pl_pct > 0 and r.values.get("trend_5m") == 0.0
+
+
+def rules_peak_sell(book: str, entered: date | None) -> bool:
+    """A 10-7 name sells when its ready mark's 5-minute trend turns down.
+
+    The mark is the existing one: up at least 2% and 4 of 6 peak readings,
+    then a downtrend while the position is still in profit. Operator
+    2026-11-14. Small caps, picks, the sweep, QQQ, and a rules name opened
+    before the 10-7 book stay on their own exits. An unknown fill date stays off.
+    """
+    return book == "gemma" and sat.rules_rotation(entered)
 
 
 def update_marks(marks: Mapping[str, Mapping], rs: Sequence[Readings], *, now: str,

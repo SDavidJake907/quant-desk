@@ -7,6 +7,7 @@ plumbing that fails loudly; those two fail silently and expensively.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 import httpx
@@ -19,6 +20,7 @@ from scanner.execution.alpaca import (
     BrokerError,
     bracket_payload,
     client_order_id,
+    order_payloads,
     round_tick,
 )
 from scanner.execution.sizing import Sizing
@@ -332,3 +334,81 @@ def test_the_offset_is_a_declared_policy_field_used_by_trade_py():
     assert TradingPolicy().entry_limit_offset_pct == 0.3
     source = (Path(__file__).parent.parent / "scripts" / "trade.py").read_text(encoding="utf-8")
     assert "entry_offset_pct=policy.entry_limit_offset_pct" in source
+
+
+def test_a_refused_order_keeps_the_broker_reason():
+    """A 403 used to become 'Client error 403 Forbidden' and drop the body.
+    The 2026-11-03 QQQ add failed that way, so the reason was never recorded."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"message": "potential wash trade detected"},
+            headers={"X-Request-ID": "abc123"},
+        )
+
+    broker = Alpaca("key", "secret", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(BrokerError) as caught:
+        asyncio.run(broker.submit({"symbol": "QQQ", "side": "buy", "type": "limit", "qty": "1"}))
+    text = str(caught.value).lower()
+    assert "wash" in text
+    assert "403" in text
+    assert "abc123" in text
+
+
+def test_a_422_is_still_called_rejected():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"message": "qty must be > 0"})
+
+    broker = Alpaca("key", "secret", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(BrokerError) as caught:
+        asyncio.run(broker.submit({"symbol": "QQQ", "side": "buy", "type": "limit", "qty": "0"}))
+    assert str(caught.value).startswith("rejected")
+    assert "qty must be" in str(caught.value)
+
+
+class _Tier:
+    def __init__(self, label: str, price: float, pct: float):
+        self.label, self.target_price, self.pct_of_shares = label, price, pct
+
+
+class _Ladder:
+    symbol = "MU"
+    entry_price = 100.0
+    stop_price = 90.0
+    targets = (_Tier("1R", 110.0, 0.5), _Tier("2R", 120.0, 0.5))
+
+
+def test_a_sweep_setup_without_a_ladder_is_one_bracket():
+    """smc.Setup has target_price and no targets. The 12:03 scan on 2026-11-02
+    died on that attribute before it could send the bracket."""
+    with pytest.raises(AttributeError):
+        SETUP.targets  # the crash the scan used to hit
+    payloads = order_payloads(SETUP, SIZING, AT, entry_offset_pct=0.3)
+    assert payloads == [bracket_payload(SETUP, SIZING, AT, entry_offset_pct=0.3)]
+    from scanner.models import TradeIntent
+    intent = TradeIntent(
+        symbol=SETUP.symbol, action="buy", trigger_at=AT,
+        entry_price=SETUP.entry_price, stop_price=SETUP.stop_price,
+        target_price=SETUP.target_price, shares=SIZING.shares,
+        risk_dollars=SIZING.risk_dollars, position_dollars=SIZING.position_dollars,
+        reward_risk=SETUP.reward_risk, client_order_id=payloads[0]["client_order_id"],
+        targets=(),
+    )
+    assert intent.target_price == SETUP.target_price
+    assert intent.reward_risk == pytest.approx(SETUP.reward_risk)
+
+
+def test_a_ladder_setup_is_an_entry_two_targets_and_a_stop():
+    sizing = Sizing(shares=10, risk_dollars=100.0, position_dollars=1000.0, limited_by="risk")
+    payloads = order_payloads(_Ladder(), sizing, AT)
+    assert [p["side"] for p in payloads] == ["buy", "sell", "sell", "sell"]
+    assert payloads[0]["type"] == "limit" and "order_class" not in payloads[0]
+    assert payloads[-1]["type"] == "stop"
+    assert payloads[0]["client_order_id"] == f"smc-MU-{int(AT.timestamp())}"
+
+
+def test_trade_py_does_not_read_a_ladder_the_setup_lacks():
+    from pathlib import Path
+    source = Path("scripts/trade.py").read_text(encoding="utf-8")
+    assert "if setup.targets:" not in source
+    assert "order_payloads(" in source

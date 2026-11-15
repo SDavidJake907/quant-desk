@@ -85,17 +85,26 @@ Report $have "model $wanted" $(if ($have) { "present" } else { "MISSING - news g
 #
 # Both directions are reported. A task expected and absent is a gap; a task that
 # exists and is not expected is one somebody forgot to remove.
+# Live tasks only. Retired jobs stay registered and Disabled on purpose
+# (register_tasks.ps1); a Disabled task is not a gap and not a surprise.
 $expected = @(
     "stock-scanner-scan",
-    "stock-scanner-data",
+    "stock-scanner-picks",
+    "stock-scanner-orb",
+    "stock-scanner-peakwatch",
+    "stock-scanner-held-news",
+    "stock-scanner-position-watch",
+    "stock-scanner-polymarket",
+    "stock-scanner-health",
+    "stock-scanner-preclose",
     "stock-scanner-flatten",
+    "stock-scanner-data",
     "stock-scanner-outcomes",
-    "stock-scanner-news",
-    "stock-scanner-sector",
-    "stock-scanner-extended",
-    "stock-scanner-extras",
-    "stock-scanner-advisor-pre",
-    "stock-scanner-advisor-live"
+    "stock-scanner-grok-desk-plan",
+    "stock-scanner-gemma-desk-plan",
+    "stock-scanner-grok-desk-settle",
+    "stock-scanner-gemma-desk-settle",
+    "stock-scanner-grok-sunday"
 )
 $registered = @(Get-ScheduledTask -TaskName "stock-scanner-*" -ErrorAction SilentlyContinue)
 foreach ($name in $expected) {
@@ -104,10 +113,11 @@ foreach ($name in $expected) {
         $info = Get-ScheduledTaskInfo -TaskName $name
         Report ($task.State -ne "Disabled") $name "$($task.State), next $($info.NextRunTime)"
     } else {
-        Report $false $name "NOT REGISTERED - run scripts\register_tasks.ps1"
+        Report $false $name "NOT REGISTERED - run the matching scripts\register_*.ps1"
     }
 }
 foreach ($task in $registered) {
+    if ($task.State -eq "Disabled") { continue }
     if ($expected -notcontains $task.TaskName) {
         Report $false $task.TaskName "REGISTERED BUT UNEXPECTED"
     }

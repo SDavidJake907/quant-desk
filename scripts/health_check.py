@@ -24,7 +24,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from scanner.config import settings  # noqa: E402
-from scanner.execution import ownership  # noqa: E402
+from scanner.execution import ownership, plan_run  # noqa: E402
+from scanner.execution import satellite as sat  # noqa: E402
 from scanner.execution.alpaca import Alpaca  # noqa: E402
 from scanner.execution.policy import TradingPolicy  # noqa: E402
 from scanner.ops import deskcheck, notify  # noqa: E402
@@ -74,7 +75,11 @@ async def broker_findings(c: httpx.AsyncClient, today: date) -> tuple[list[h.Fin
     # as in protect.py / hub.py / desk_journal.py; flagging them daily buries a real gap.
     owner_map = ownership.owners(orders)
     stopless = TradingPolicy().stopless_strategies
-    positions = [p for p in positions if ownership.owner(p["symbol"], owner_map) not in stopless]
+    entered = plan_run.entry_dates(orders, (ownership.GEMMA,))
+    positions = [p for p in positions
+                 if ownership.owner(p["symbol"], owner_map) not in stopless
+                 and not sat.rules_book_has_no_stop(ownership.owner(p["symbol"], owner_map),
+                                                    entered.get(p["symbol"]))]
     found = h.stop_gaps(positions, orders)
     if len(orders) >= 500:
         found.append(h.Finding(level="watch", text="stops: 500+ orders in 120 days -- older stops not read"))

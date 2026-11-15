@@ -1,12 +1,11 @@
-"""The rules book's 9:45 pick: what fills the 40% sleeve Gemma used to choose for.
+"""The rules book's 9:45 pick.
 
-Operator 2026-10-26: "stop Gemma from picking, and have the code find the stocks". From the
-S&P 500 pool (advisor/gemma_pool.py, the scanner's floor), the names that pass the plan's buy
-checks (satellite_feed.buyable_pool, then refusals for the sector cap and recent sales) are
-ranked by 12-1 momentum, strongest first, and the top ones fill the free slots. Equal size,
-2.5 ATR stop, no target; the plan's exits sell (execution/satellite.py). No model is asked.
+From 2026-11-03 the book is the large-cap 10-7 rotation (execution/satellite.py): the S&P 500
+through the scanner's floor, ranked by the return from 10 months ago to 7 months ago, the
+top names into the free slots. No model is asked. The `gem-` order ids stay, so a position
+opened before that day keeps its stop and its old exits.
 
-The book keeps the `gem-` order ids so the positions held at the change keep their exits.
+`ranked` and `queue_item` are the earlier 12-1 ordering. The live pick uses `momentum_ranked`.
 
 PURE: rows in, new lists out. scripts/rules_pick.py does the reading and the queueing.
 """
@@ -42,3 +41,20 @@ def queue_item(row: PoolRow, *, rank: int, passing: int) -> dict[str, Any]:
     mom = f"{row.mom_12_1:+.0f}%" if row.mom_12_1 is not None else "n/a"
     return {"reason": f"rules: #{rank} of {passing} passing the buy checks by 12-1 momentum ({mom})",
             "stop": "normal", "target": "none", "size": "normal"}
+
+
+def momentum_ranked(rows: Iterable[PoolRow], scores: Mapping[str, float | None],
+                    exclude: Iterable[str] = ()) -> list[PoolRow]:
+    """Strongest 10-month-to-7-month return first. A name with no score is left out,
+    as the lab leaves out a bar whose momentum is missing."""
+    skip = set(exclude)
+    keep = [r for r in rows if r.symbol not in skip and scores.get(r.symbol) is not None]
+    return sorted(keep, key=lambda r: (-float(scores[r.symbol]), r.symbol))
+
+
+def rotation_item(row: PoolRow, *, rank: int, passing: int, momentum: float) -> dict[str, Any]:
+    """A buy_queue item for the 10-7 book. `rotation` is how the 10:00 pass tells it
+    from a queue written by the older 12-1 pick. No stop."""
+    return {"reason": (f"rules: #{rank} of {passing} by momentum from 10 months ago to 7 months ago "
+                       f"({momentum:+.0f}%)"),
+            "stop": "none", "target": "none", "size": "slot", "rotation": True}

@@ -11,7 +11,7 @@ spec.loader.exec_module(cc)
 
 
 def test_every_current_book_prefix_is_named():
-    assert cc.book_of("cor-SPY-1") == "SPY core"
+    assert cc.book_of("cor-SPY-1") == "Index core"
     assert cc.book_of("gem-VTRS-1") == "Rules book"
     assert cc.book_of("sml-INSW-1") == "Small caps"
     assert cc.book_of("orb-NUE-1") == "ORB"
@@ -20,11 +20,12 @@ def test_every_current_book_prefix_is_named():
 
 def test_slot_limits_come_from_the_policy():
     from scanner.execution.policy import TradingPolicy
+    from scanner.execution.satellite import RULES_TOP_N
     p = TradingPolicy()
     slots = cc.slot_limits(SCRIPT.parents[1])
-    assert slots["Rules book"][1] == p.gemma_max_positions
+    assert slots["Rules book"][1] == RULES_TOP_N == 10
     assert slots["Small caps"][1] == p.small_max_positions
-    assert slots["ORB"][1] == p.orb_max_positions
+    assert slots["Sweep"][1] == p.max_positions
 
 
 def test_last_run_reads_only_the_latest_block():
@@ -74,7 +75,7 @@ def test_the_spy_core_is_flagged_when_naked(tmp_path):
     d = cc.gather(tmp_path, cc.Broker({}, fixture=path))
     assert sorted(d["naked"]) == ["APA", "SPY"]
     page = cc.render(d)
-    assert "no stop by design" not in page and "No live stop: APA, SPY" in page
+    assert "no stop by design" not in page and "No live stop: SPY, APA" in page
 
 
 def _fill(sym, side, qty, px, at, coid="x", typ="market"):

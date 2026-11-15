@@ -10,6 +10,7 @@ WHAT IT IS NOT
 It never places, cancels or changes an order. The calls are played out here against daily
 bars in a paper sleeve of SLEEVE dollars (the rules book's 30%) and graded at the freeze's
 end (FREEZE.md, 2026-12-31). A sleeve with real orders is the operator's call after that.
+Grok does not keep a book. Settle plays a plan only after he has verified it (`verified`).
 
 HOW A CALL PLAYS OUT (one daily bar at a time, pessimistic when a bar is ambiguous)
 - A buy is good for the plan's session only. "limit" fills when the low reaches the entry
@@ -25,6 +26,8 @@ HOW A CALL PLAYS OUT (one daily bar at a time, pessimistic when a bar is ambiguo
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from datetime import date
 from typing import Literal
 
@@ -66,6 +69,16 @@ class Plan(Frozen):
     market: str = ""
     calls: tuple[Call, ...] = ()
     skipped: tuple[str, ...] = Field(default=(), description="refused calls, with the reason")
+    #: Grok's verify step set this. Settle plays nothing from a plan he has not signed.
+    verified: bool = False
+
+
+class Verdict(Frozen):
+    """Grok's yes or no on one call. He cannot add a call or change a price."""
+
+    symbol: str
+    approve: bool
+    why: str = ""
 
 
 class Position(Frozen):
@@ -119,7 +132,70 @@ class Bar(Frozen):
     c: float
 
 
-#: The --json-schema Claude's plan must match (validated again by `check` below).
+#: The --json-schema Grok's verify step must match. A missing call is a no.
+VERIFY_SCHEMA: dict = {
+    "type": "object",
+    "required": ["approve_market", "market_why", "calls"],
+    "properties": {
+        "approve_market": {"type": "boolean"},
+        "market_why": {"type": "string"},
+        "calls": {"type": "array", "items": {
+            "type": "object",
+            "required": ["symbol", "approve", "why"],
+            "properties": {
+                "symbol": {"type": "string"},
+                "approve": {"type": "boolean"},
+                "why": {"type": "string"},
+            },
+        }},
+    },
+}
+
+
+def apply_verdicts(plan: Plan, verdicts: Sequence[Verdict], *, market_ok: bool, market_why: str) -> Plan:
+    """Keep the calls Grok approved. Anything he skipped, or never named, is not played.
+
+    A verdict for a symbol that is not in the plan is ignored, so he cannot add a buy.
+    """
+    by: dict[str, Verdict] = {}
+    for verdict in verdicts:
+        symbol = verdict.symbol.strip().upper()
+        if symbol and symbol not in by:
+            by[symbol] = verdict
+    keep: list[Call] = []
+    skipped: list[str] = list(plan.skipped)
+    for call in plan.calls:
+        verdict = by.get(call.symbol.strip().upper())
+        if verdict is not None and verdict.approve:
+            keep.append(call)
+            continue
+        reason = verdict.why.strip() if verdict is not None and verdict.why.strip() else "no reason given"
+        skipped.append(f"{call.symbol}: Grok disapproved ({reason})")
+    market = plan.market
+    if not market_ok:
+        why = market_why.strip() or "no reason given"
+        market = f"Grok disapproved the market note ({why}). {market}"
+    return plan.model_copy(update={"calls": tuple(keep), "skipped": tuple(skipped),
+                                   "market": market, "verified": True})
+
+
+def for_settle(plan: Plan | None) -> Plan | None:
+    """Settle plays a plan only after Grok has verified it. Stops still run when this returns None."""
+    if plan is None or not plan.verified:
+        return None
+    return plan
+
+
+def sunday_banner(*, approve: bool | None, why: str) -> str:
+    """The line on Claude's Sunday read. None means Grok did not answer."""
+    if approve is True:
+        return "Grok approved this read."
+    if approve is False:
+        return f"Grok DISAPPROVED this read: {why.strip() or 'no reason given'}."
+    return f"Grok could not verify this read ({why.strip() or 'no answer'}). It is not accepted."
+
+
+#: The --json-schema a desk's plan must match (validated again by `check` below).
 SCHEMA: dict = {
     "type": "object",
     "required": ["market", "calls"],
@@ -142,6 +218,47 @@ SCHEMA: dict = {
         }},
     },
 }
+
+
+def grok_object(text: str) -> dict:
+    """The one JSON object from `grok -p --output-format json`.
+
+    Stdout is that object. A preamble (an updater line that leaked onto stdout)
+    is skipped so a scheduled run still gets the plan.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("no answer")
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("no answer") from None
+        out = json.loads(raw[start:end + 1])
+    if not isinstance(out, dict):
+        raise ValueError("no answer")
+    return out
+
+
+def grok_answer(out: dict, *, structured: bool) -> tuple[dict | str, float]:
+    """The plan or the text, and the list cost, from `grok -p --output-format json`.
+
+    Grok's object uses `structuredOutput` (camelCase) and `text`. A failed run
+    exits non-zero; a JSON error object is refused here too.
+    """
+    if out.get("type") == "error" or out.get("is_error"):
+        raise ValueError(str(out.get("message") or out.get("text") or "grok error")[:800])
+    cost = float(out.get("total_cost_usd") or 0.0)
+    if not structured:
+        text = str(out.get("text") or "").strip()
+        if not text:
+            raise ValueError("no answer")
+        return text, cost
+    body = out.get("structuredOutput")
+    if not isinstance(body, dict):
+        raise ValueError(f"no structured plan: {str(out.get('text'))[:800]}")
+    return body, cost
 
 
 def check(call: Call, *, last_close: float | None, held: Position | None) -> str | None:

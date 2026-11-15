@@ -69,6 +69,34 @@ def client_order_id(setup: Setup, at: datetime) -> str:
     return f"smc-{setup.symbol}-{int(at.timestamp())}"
 
 
+def order_payloads(setup: Any, sizing: Sizing, at: datetime,
+                   entry_offset_pct: float = 0.0) -> list[dict[str, Any]]:
+    """Orders for one fresh setup.
+
+    A sweep setup has `target_price` and no `targets`. The 12:03 scan on
+    2026-11-02 read `setup.targets`, raised AttributeError, and sent nothing.
+    One target is one bracket, so the stop exists when the entry fills.
+    A setup that carries tiers still gets the ladder.
+    """
+    tiers = getattr(setup, "targets", None) or ()
+    if not tiers:
+        return [bracket_payload(setup, sizing, at, entry_offset_pct=entry_offset_pct)]
+    coid = client_order_id(setup, at)
+    entry = entry_payload(
+        setup.symbol, sizing.shares, setup.entry_price, at, coid,
+        entry_offset_pct=entry_offset_pct)
+    remaining = sizing.shares
+    payloads = [entry]
+    for tier in tiers:
+        tier_shares = max(1, int(sizing.shares * tier.pct_of_shares))
+        remaining -= tier_shares
+        payloads.append(take_profit_payload(
+            setup.symbol, tier_shares, tier.target_price, tier.label, at, coid))
+    payloads.append(stop_payload(
+        setup.symbol, max(1, remaining), setup.stop_price, at, coid))
+    return payloads
+
+
 def bracket_payload(setup: Setup, sizing: Sizing, at: datetime,
                     entry_offset_pct: float = 0.0) -> dict[str, Any]:
     """The order body: buy `shares`, with stop and target attached.
@@ -426,11 +454,15 @@ class Alpaca:
         would no longer produce — a trade the backtest never modelled.
 
         Only unfilled buys are touched. Protective sell legs are never
-        cancelled here, which is the whole point of the GTC change.
+        cancelled here, which is the whole point of the GTC change. Only the
+        sweep's own (`smc-`) buys: since it shares the account with the other
+        books (2026-11-02), a resting index-core or rules-book buy is theirs.
         """
         cancelled: list[str] = []
         for order in await self._get("/v2/orders", status="open", nested="true"):
             if order.get("side") != "buy" or float(order.get("filled_qty") or 0) > 0:
+                continue
+            if not str(order.get("client_order_id") or "").startswith("smc-"):
                 continue
             submitted = order.get("submitted_at") or order.get("created_at")
             if not submitted:
@@ -474,10 +506,14 @@ class Alpaca:
                 json=payload, timeout=30.0,
             )
             self.last_request_id = response.headers.get("X-Request-ID", "")
-            if response.status_code == 422:
+            if response.status_code >= 400:
+                # Keep the body. A 403 used to become "Client error 403 Forbidden"
+                # and the broker's reason (a wash trade, on the QQQ add) was lost.
                 suffix = f" (request {self.last_request_id})" if self.last_request_id else ""
-                raise BrokerError(f"rejected{suffix}: {response.text[:200]}")
-            response.raise_for_status()
+                body = (response.text or "").replace("\n", " ")[:300]
+                if response.status_code == 422:
+                    raise BrokerError(f"rejected{suffix}: {body}")
+                raise BrokerError(f"order failed{suffix}: {response.status_code} {body}")
             return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             suffix = f" (request {self.last_request_id})" if self.last_request_id else ""

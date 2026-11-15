@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 #: Order statuses that are still working (alpaca.LIVE_STATUSES, minus nothing).
@@ -47,15 +48,50 @@ def exit_payload(symbol: str, qty: int, at: datetime) -> dict[str, Any]:
     }
 
 
+def uncovered(qty: int, closing: int) -> int:
+    """Shares that still need a stop or a close.
+
+    A working market sell already has its shares. Re-arming those shares is a
+    second sell on the same position: on 2026-11-02 the broker answered 403
+    and the log still called the names naked.
+    """
+    return max(0, int(qty) - int(closing))
+
+
+def clear_alert(folders: Iterable[Path]) -> list[str]:
+    """Remove the protection note once nothing is naked. A later gap writes a new one.
+
+    Returns a line for each note that is still there. A locked file on Windows
+    raises PermissionError, which unlink(missing_ok=True) does not hide.
+    """
+    stuck: list[str] = []
+    for folder in folders:
+        path = Path(folder) / "PROTECTION_ALERT.txt"
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            stuck.append(f"{path}: {exc}")
+    return stuck
+
+
 def closing_shares(orders: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """Shares already being sold by a working market order, per symbol, so a
-    later run does not send a second close for the same position."""
+    """Shares a working market sell still has open, per symbol.
+
+    The order's qty stays at the original size while fills shrink the
+    position. Counting qty would treat those filled shares as covered a
+    second time, and the rest would be left with no stop.
+    """
     out: dict[str, int] = {}
     for order in orders:
-        if (order.get("side") == "sell" and order.get("type") == "market"
+        if not (order.get("side") == "sell" and order.get("type") == "market"
                 and str(order.get("status", "")) in WORKING):
-            symbol = str(order.get("symbol", ""))
-            out[symbol] = out.get(symbol, 0) + int(float(order.get("qty") or 0))
+            continue
+        symbol = str(order.get("symbol", ""))
+        ordered = int(float(order.get("qty") or 0))
+        filled = int(float(order.get("filled_qty") or 0))
+        left = max(0, ordered - filled)
+        if left:
+            out[symbol] = out.get(symbol, 0) + left
     return out
 
 
@@ -67,5 +103,6 @@ def alert_text(rows: Iterable[tuple[str, int, str, str]], *, when: str) -> str:
               for symbol, qty, decision, result in rows]
     lines += ["", "close_stop / close_target: a market sell was sent (queued for the",
               "open if the market was shut). unknown: no stop on record -- act by hand.",
-              "Check the broker; then delete this file."]
+              "Check the broker. This file stays until a later pass finds every",
+              "open position stopped."]
     return "\n".join(lines) + "\n"

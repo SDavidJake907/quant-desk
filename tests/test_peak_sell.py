@@ -1,4 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+
+import pytest
 
 from scanner.ops import peak_sell as ps
 
@@ -78,6 +80,26 @@ def test_prompt_contains_plan_and_readings():
     assert "[A]" in text and "6 of 6" in text and "ELIGIBLE" in text and "PLAN" in text
 
 
+def test_atr_percent_of_uses_the_price_the_card_shows():
+    """The stored ATR is a percent of the official close. The card's gap is a
+    percent of the live price, so the percent has to be restated on that price
+    or the ATR count is the dollar gap over the wrong base."""
+    assert ps.atr_percent_of(3.154, 40.38, 40.38) == pytest.approx(3.154)
+    assert ps.atr_percent_of(3.154, 40.38, 39.40) == pytest.approx(3.154 * 40.38 / 39.40)
+    assert ps.atr_percent_of(None, 40.38, 39.40) is None
+
+
+def test_readings_name_the_regular_session_they_used():
+    t0 = datetime(2026, 9, 1, 9, 30)
+    five = []
+    for d in range(30):
+        for i in range(78):
+            p = 100 + d + i * 0.01
+            five.append((t0 + timedelta(days=d, minutes=5 * i), p, p + 0.1, p - 0.1, p, 1000))
+    r = ps.readings("X", 1.0, five, [100 + i * 0.5 for i in range(200)])
+    assert r.session_day == "2026-09-30"
+
+
 def test_stop_note_shows_distance_in_atr():
     note = ps.stop_note(100.0, 90.0, 4.0)
     assert "$90.00" in note and "11.1%" in note and "2.8 ATR" in note
@@ -100,6 +122,16 @@ def test_ready_then_sell_on_trend_turn():
     turned = ps.Readings("A", 1.5, dict(HOT, trend_5m=0.0, stc_1h=10))
     _, _, sell = ps.update_marks(marks, [turned], now="t3", prices={})
     assert sell == ["A"]
+
+
+def test_the_10_7_book_sells_a_ready_downturn_and_the_other_books_do_not():
+    assert ps.rules_peak_sell("gemma", date(2026, 11, 3)) is True
+    assert ps.rules_peak_sell("gemma", date(2026, 11, 10)) is True
+    assert ps.rules_peak_sell("gemma", date(2026, 11, 2)) is False
+    assert ps.rules_peak_sell("gemma", None) is False
+    assert ps.rules_peak_sell("small", date(2026, 11, 11)) is False
+    assert ps.rules_peak_sell("smc", date(2026, 11, 10)) is False
+    assert ps.rules_peak_sell("core", date(2026, 11, 10)) is False
 
 
 def test_no_sell_when_red_or_not_marked():

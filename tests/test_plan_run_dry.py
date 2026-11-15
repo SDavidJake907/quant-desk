@@ -40,3 +40,37 @@ def test_dry_buy_pass_logs_nothing_and_keeps_the_queue(tmp_path, monkeypatch):
     assert any("skipped at 10:00" in s for s in lines)
     assert any("WOULD BUY (queued) BBB" in s for s in lines)
     assert json.loads(queue.read_text()) == body
+
+
+def test_the_10_7_book_buys_a_rotation_item_and_drops_an_old_queue(tmp_path, monkeypatch):
+    queue = tmp_path / "buy_queue.json"
+    body = {"day": "2026-11-03", "items": {
+        "OLD": {"reason": "12-1", "price": 50.0, "alerts": []},
+        "NEW": {"reason": "10-7", "price": 40.0, "alerts": [], "rotation": True},
+    }}
+    queue.write_text(json.dumps(body))
+    monkeypatch.setattr(buy_queue, "PATH", str(queue))
+
+    async def none_skipped(client, due, today, log):
+        return {}
+
+    calls = []
+
+    async def fake_rotation(broker, client, symbol, **kw):
+        calls.append(symbol)
+        return bookorders.Bought(symbol=symbol, ok=True, message="sent",
+                                 sizing=bookorders.Sizing(shares=1, risk_dollars=0.0,
+                                                          position_dollars=40.0, limited_by="equal slot"))
+
+    class Broker:
+        async def _get(self, path, **_):
+            return {"equity": "100000", "last_equity": "100000", "buying_power": "200000",
+                    "cash": "50000", "status": "ACTIVE"}
+
+    monkeypatch.setattr(plan_run, "_rechecks", none_skipped)
+    monkeypatch.setattr(bookorders, "buy_rotation", fake_rotation)
+    monkeypatch.setattr(bookorders, "buy_with_stop", lambda *a, **k: (_ for _ in ()).throw(AssertionError("stop")))
+    monkeypatch.setattr(bookorders, "log", lambda *a, **k: None)
+    now = datetime(2026, 11, 3, 10, 5, tzinfo=sat.ET)
+    asyncio.run(plan_run.buy_pass(Broker(), None, [], {}, [], now, False, lambda s: None, TradingPolicy()))
+    assert calls == ["NEW"]

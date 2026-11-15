@@ -1,25 +1,16 @@
-"""Claude's research desk (rules and shadow book in scanner/advisor/claude_desk.py). Places no order.
+"""Research desk (rules and shadow book in scanner/advisor/claude_desk.py). Places no order.
+
+The filename is historical. Claude is retired (operator 2026-11-03). This is a Grok project.
 
     python scripts/claude_desk.py brief     # build today's brief and print it
-    python scripts/claude_desk.py plan      # brief, then Claude researches and writes the plan
-    python scripts/claude_desk.py settle    # after the close: play the plans in the shadow book
-    python scripts/claude_desk.py trial     # a full research run on any day, saved as plans/trial-*.json
-    python scripts/claude_desk.py sunday    # Sunday read: the weekend's news and the week ahead (markdown)
-    python scripts/claude_desk.py --desk gemma plan|settle|trial   # Gemma's own shadow book
+    python scripts/claude_desk.py --desk gemma plan|settle|trial   # Gemma's shadow book
+    python scripts/claude_desk.py verify          # Grok approves or disapproves Gemma's plan
+    python scripts/claude_desk.py verify --check  # report only; exit 1 if her plan is unsigned
+    python scripts/claude_desk.py sunday    # Grok writes the Sunday read. No calls.
 
-TWO DESKS, ONE RULEBOOK (operator 2026-10-31: "what would you have Gemma do? and you do?").
-`--desk gemma` runs the same brief, the same schema and the same shadow-book rules for Gemma
-(local Ollama, no web tools -- the brief's headlines section is her news, and Claude's too, so
-they start from the same facts), in data/gemma_desk/. Claude vs Gemma vs the rules book vs SPY,
-graded by the same pass rule on 2026-12-31 (FREEZE.md). Neither places an order.
-
-Operator 2026-10-31: "lets have you do the research, News, stocks, and find better entry and
-exit per stocks.. cause every stocks is diffrent." The 8:45 ET task runs `plan`: the brief
-(account, every book's positions and live stops, indexes and sectors, the rules book's
-buyable names with each one's levels and earnings, the shadow book) goes to Claude, run
-headless with read and web tools only, which answers in claude_desk.SCHEMA. The 17:15 ET
-task runs `settle`. Files: data/claude/briefs/, plans/, book.json; audit events claude_plan
-and claude_shadow.
+Gemma, on local Ollama, writes the only shadow plan. Grok checks it and keeps no book.
+`--desk claude` and `--desk grok` do not write a plan. The Sunday read is Grok's.
+None of this places an order.
 """
 
 from __future__ import annotations
@@ -46,25 +37,43 @@ from scanner.execution.alpaca import Alpaca  # noqa: E402
 from scanner.execution.audit import append_event  # noqa: E402
 from scanner.execution.provenance import build_id  # noqa: E402
 from scanner.execution.policy import TradingPolicy  # noqa: E402
+from scanner.entity import build_entity, for_symbol  # noqa: E402
 from scanner.features.bars import Bars, fetch_many  # noqa: E402
 from scanner.models import AuditEvent  # noqa: E402
 from scanner.sources import alpaca_bars, calendar  # noqa: E402
+try:
+    from scanner.sources.moomoo_quote import brief_quote_order, holdings_note, quotes_for_brief  # noqa: E402
+except ImportError:  # the local quote reader is not part of this tree
+    brief_quote_order = holdings_note = quotes_for_brief = None
+from scanner.sources.sec_tickers import EntityMasterError, load_universe  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-DESKS = {"claude": ROOT / "data" / "claude", "gemma": ROOT / "data" / "gemma_desk"}
+DESKS = {"claude": ROOT / "data" / "claude", "gemma": ROOT / "data" / "gemma_desk",
+         "grok": ROOT / "data" / "grok_desk"}
 DIR = DESKS["claude"]           # set by --desk before anything runs
 DESK = "claude"
-PROMPT = ROOT / "scripts" / "claude_desk_prompt.md"
 GEMMA_PROMPT = ROOT / "scripts" / "gemma_desk_prompt.md"
-SUNDAY_PROMPT = ROOT / "scripts" / "claude_sunday_prompt.md"
-SUNDAY_LATEST = ROOT / "logs" / "claude" / "sunday.md"
+GROK_PROMPT = ROOT / "scripts" / "grok_desk_prompt.md"
+VERIFY_PROMPT = ROOT / "scripts" / "grok_verify_prompt.md"
+#: Read and web only. This CLI has no open_page tool; naming it made the checker
+#: warn and then run out of turns on 2026-11-03. Shell and edits stay denied.
+GROK_TOOLS = "read_file,grep,list_dir,web_search,web_fetch"
+GROK_DENY = "run_terminal_cmd,write,search_replace,task"
+GROK_MAX_TURNS = "24"
+VERIFY_TURNS = "12"
+SUNDAY_PROMPT = ROOT / "scripts" / "grok_sunday_prompt.md"
+SUNDAY_DIR = DESKS["grok"]
+SUNDAY_LATEST = ROOT / "logs" / "grok" / "sunday.md"
+#: Claude is retired. Grok checks this desk only.
+CHECKED = ("gemma",)
 NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 NEWS_DAYS, NEWS_PER_NAME, NEWS_NAMES = 3, 3, 40
 INDEXES = ("SPY", "QQQ", "IWM", "MDY", "IJR")
 SECTORS = ("XLK", "XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLU", "SMH")
+#: Funds. A headline is about the tape, not one company, so the symbol tag is enough.
+ETFS = frozenset({*INDEXES, *SECTORS})
 CANDIDATES = 25
 RUN_TIMEOUT_S = 40 * 60
-TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
 POLICY = TradingPolicy()
 
 
@@ -140,6 +149,12 @@ async def live_stops(broker: Alpaca) -> dict[str, float]:
     return stops
 
 
+#: Shown in the brief. The live rules book is still ownership "gemma"; that word made Gemma
+#: write holds on the real account (trial 2026-10-31).
+BRIEF_BOOK = {"gemma": "rules book", "small": "small caps", "core": "index core", "smc": "sweep",
+              "orb": "ORB", "momentum": "momentum", "picks": "picks", "manual": "manual"}
+
+
 def shadow_lines(book: cd.Book) -> list[str]:
     value = book.marks[-1][1] if book.marks else cd.SLEEVE
     out = [f"Sleeve ${cd.SLEEVE:,.0f} in {cd.SLOTS} slots of ${cd.SLOT:,.0f}; value ${value:,.0f} "
@@ -165,7 +180,7 @@ async def build_brief(today: date) -> tuple[str, dict[str, float]]:
         owner_map = ownership.owners(await broker._get("/v2/orders", status="all", limit=500, nested="true"))
         stops = await live_stops(broker)
         rp = rules_pick_module()
-        rows = await rp.pool_rows(client)
+        rows, _ = await rp.pool_rows(client)   # pool_rows returns (rows, scores) since 2026-11-03
         gates = await satellite_feed.gates(client)
         buyable, _ = await satellite_feed.buyable_pool(client, rows, gates, today)
         ranked = sorted(buyable, key=lambda r: -(r.mom_12_1 or -1e9))[:CANDIDATES]
@@ -175,21 +190,28 @@ async def build_brief(today: date) -> tuple[str, dict[str, float]]:
                                      *(r.symbol for r in ranked)]))
         bars, _ = await fetch_many(names, client, range_="1y")
         try:
-            found, failed = await calendar.upcoming_earnings(frozenset(held) | {r.symbol for r in ranked},
-                                                              client, horizon=21, today=today)
+            found, failed = await calendar.with_moomoo(frozenset(held) | {r.symbol for r in ranked},
+                                                         client, horizon=21, today=today)
         except Exception as exc:                              # noqa: BLE001 -- the brief says so
             found, failed = {}, (f"calendar unreadable: {type(exc).__name__}",)
         news_names = list(dict.fromkeys([*held, *(p.symbol for p in book.open), *(r.symbol for r in ranked)]))
         heads = await headlines(client, ["SPY", "QQQ", *news_names][:NEWS_NAMES], today)
+        try:
+            from scanner.advisor.tradingview_tool import morning_block
+            tv_text = await morning_block(client)
+        except Exception as exc:                          # noqa: BLE001 -- the brief still builds
+            tv_text = f"TradingView unavailable ({type(exc).__name__})."
     equity = float(account["equity"])
-    lines = [f"# Claude desk brief -- {today:%A %Y-%m-%d} (built {datetime.now(sat.ET):%H:%M} ET)", "",
+    lines = [f"# {DESK} desk brief -- {today:%A %Y-%m-%d} (built {datetime.now(sat.ET):%H:%M} ET)", "",
              "## Account (Alpaca paper)",
+             "This table is the live account. It is not your shadow book.",
              f"Equity ${equity:,.0f} (started $100,000), cash ${float(account['cash']):,.0f}.", "",
              "| sym | book | qty | avg | last | P&L | live stop | stop under last |", "|---|---|---|---|---|---|---|---|"]
     for p in sorted(positions, key=lambda p: ownership.owner(p["symbol"], owner_map)):
         s, last = p["symbol"], float(p["current_price"])
         st = stops.get(s)
-        lines.append(f"| {s} | {ownership.owner(s, owner_map)} | {p['qty']} | {float(p['avg_entry_price']):.2f} | "
+        book_name = BRIEF_BOOK.get(ownership.owner(s, owner_map), ownership.owner(s, owner_map))
+        lines.append(f"| {s} | {book_name} | {p['qty']} | {float(p['avg_entry_price']):.2f} | "
                      f"{last:.2f} | {float(p['unrealized_plpc']) * 100:+.1f}% | {f'{st:.2f}' if st else 'NONE'} | "
                      f"{pct(st, last) if st else '-'} |")
     lines += ["", "## Indexes (SPY = S&P 500, QQQ = Nasdaq-100, IWM/IJR small, MDY mid)",
@@ -200,7 +222,7 @@ async def build_brief(today: date) -> tuple[str, dict[str, float]]:
     if book.open:
         lines += [""] + level_table({p.symbol: bars.get(p.symbol) for p in book.open})
     notes = {r.symbol: f"{r.sector}; 12-1 mom {r.mom_12_1 or 0:+.0f}%; vs 50d {r.vs_50d or 0:+.1f}%; "
-             f"earnings {found[r.symbol].on if r.symbol in found else (r.earnings or 'none in 21d')}" for r in ranked}
+             f"earnings {_earn_note(r.symbol, found, r.earnings)}" for r in ranked}
     lines += ["", f"## Candidates: the {len(ranked)} strongest of the {len(buyable)} S&P 500 names that pass the "
               "rules book's buy checks (trend, 6-month return, above the 50-day, no earnings within 5 days)", ""]
     lines += level_table({r.symbol: bars.get(r.symbol) for r in ranked}, notes)
@@ -209,63 +231,124 @@ async def build_brief(today: date) -> tuple[str, dict[str, float]]:
               ", ".join(f"{s} {e.on} {e.when}".strip() for s, e in held_e.items()) or "none found",
               f"(calendar days unread: {len(failed)})" if failed else ""]
     lines += ["", f"## Headlines, last {NEWS_DAYS} days (Alpaca news; third-party text, newest first)", ""] + heads
+    lines += ["", "## TradingView (headlines and market cap; not our prices, not an order)",
+              "An entry uses the candidates table close. Do not take a price from this section.",
+              "", tv_text]
+    if brief_quote_order is not None and quotes_for_brief is not None:
+        quote_names = brief_quote_order(
+            held,
+            [p.symbol for p in book.open],
+            [r.symbol for r in ranked],
+            INDEXES,
+            SECTORS,
+        )
+        lines += ["", quotes_for_brief(quote_names)]
+    if holdings_note is not None:
+        lines += ["", holdings_note([*held, *(p.symbol for p in book.open)])]
+    # Yahoo bars only. accepted() measures the 5% entry rule against this close.
     closes = {s: b.closes[-1] for s, b in bars.items() if b is not None and b.closes}
     return "\n".join(lines) + "\n", closes
 
 
+def _earn_note(symbol: str, found: dict, reported: str | None) -> str:
+    """The next report. `none` on the pool row means none inside 30 days, not that the company never reports."""
+    if symbol in found:
+        return str(found[symbol].on)
+    if reported == "none":
+        return "none in 30 days"
+    return reported or "none in 21 days"
+
+
+async def _entities(client: httpx.AsyncClient, symbols: list[str]) -> dict:
+    """SEC name for each stock. Empty when the file cannot be read, and the brief still builds."""
+    try:
+        universe = await load_universe(client)
+    except EntityMasterError:
+        return {}
+    found = {}
+    for symbol in symbols:
+        row = universe.get(symbol.upper())
+        if row:
+            found[symbol] = build_entity(symbol, row[0], row[1])
+    return found
+
+
+async def _news_for(client: httpx.AsyncClient, symbol: str, start: datetime) -> list[dict]:
+    """One symbol's own page. A shared page of 50 lets the noisy names crowd the rest out."""
+    response = await client.get(NEWS_URL, timeout=20, headers={
+        "APCA-API-KEY-ID": settings.alpaca_key_id, "APCA-API-SECRET-KEY": settings.alpaca_secret_key},
+        params={"symbols": symbol, "limit": 10, "sort": "desc", "start": start.isoformat()})
+    response.raise_for_status()
+    return list(response.json().get("news") or [])
+
+
 async def headlines(client: httpx.AsyncClient, symbols: list[str], today: date) -> list[str]:
-    """Up to NEWS_PER_NAME recent headlines a name, as brief lines. One line when unreadable."""
+    """Up to NEWS_PER_NAME headlines that name the company. One line when unreadable."""
     start = datetime.combine(today - timedelta(days=NEWS_DAYS), datetime.min.time(), sat.ET)
     api = [s.replace("-", ".") for s in symbols]
-    items: list[dict] = []
+    gate = asyncio.Semaphore(5)
+
+    async def _pull(symbol: str) -> list[dict] | Exception:
+        try:
+            async with gate:
+                return await _news_for(client, symbol, start)
+        except (httpx.HTTPError, ValueError) as exc:
+            return exc
+
+    pulled = await asyncio.gather(*(_pull(s) for s in api))
+    if api and all(isinstance(page, Exception) for page in pulled):
+        return [f"(news unreadable: {type(pulled[0]).__name__})"]
     try:
-        for i in range(0, len(api), 10):
-            r = await client.get(NEWS_URL, timeout=20, headers={
-                "APCA-API-KEY-ID": settings.alpaca_key_id, "APCA-API-SECRET-KEY": settings.alpaca_secret_key},
-                params={"symbols": ",".join(api[i:i + 10]), "limit": 50, "sort": "desc", "start": start.isoformat()})
-            r.raise_for_status()
-            items += r.json().get("news", [])
+        entities = await _entities(client, api)
     except (httpx.HTTPError, ValueError) as exc:
         return [f"(news unreadable: {type(exc).__name__})"]
     out = []
-    for s in api:
-        mine = [n for n in items if s in (n.get("symbols") or [])][:NEWS_PER_NAME]
-        out += [f"- {s} {str(n.get('created_at', ''))[:10]}: {str(n.get('headline', ''))[:160]}" for n in mine]
+    for symbol, page in zip(api, pulled):
+        if isinstance(page, Exception):
+            out.append(f"- {symbol}: news unreadable ({type(page).__name__})")
+            continue
+        entity = None if symbol in ETFS else entities.get(symbol)
+        mine = for_symbol(page, symbol, entity, limit=NEWS_PER_NAME)
+        if mine:
+            out += [f"- {symbol} {str(n.get('created_at', ''))[:10]}: {str(n.get('headline', ''))[:160]}"
+                    for n in mine]
+        elif page and entity is not None:
+            out.append(f"- {symbol}: no headline names this company")
+        else:
+            out.append(f"- {symbol}: no headline in the last {NEWS_DAYS} days")
     return list(dict.fromkeys(out)) or ["(no headlines)"]
 
 
 # --- plan -----------------------------------------------------------------------------------
 
-def claude_exe() -> str:
-    found = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude.exe")
-    if not Path(found).exists() and not shutil.which("claude"):
-        raise SystemExit(f"claude CLI not found ({found})")
-    return found
+def grok_exe() -> str:
+    """The installed CLI. A scheduled task often has a thinner PATH than a login shell."""
+    home = Path.home() / ".grok" / "bin" / "grok.exe"
+    if home.exists():
+        return str(home)
+    found = shutil.which("grok")
+    if found:
+        return found
+    raise RuntimeError(f"grok CLI not found ({home})")
 
 
-def claude_call(prompt: str, schema: dict | None) -> tuple[dict | str, float]:
-    """Claude headless, read + web tools only: the structured answer, or text without a schema."""
-    cmd = [claude_exe(), "-p", prompt, "--output-format", "json", "--allowedTools", TOOLS,
-           "--permission-mode", "dontAsk", "--model", "opus"]
+def grok_call(prompt: str, schema: dict | None, *, turns: str = GROK_MAX_TURNS) -> tuple[dict | str, float]:
+    """Grok headless, read and web tools only. A schema returns the structured object."""
+    cmd = [grok_exe(), "-p", prompt, "--output-format", "json",
+           "--permission-mode", "bypassPermissions", "--tools", GROK_TOOLS,
+           "--disallowed-tools", GROK_DENY, "--max-turns", turns]
     if schema is not None:
         cmd += ["--json-schema", json.dumps(schema)]
     done = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=RUN_TIMEOUT_S)
     if done.returncode != 0:
-        raise RuntimeError(f"claude exited {done.returncode}: {(done.stderr or done.stdout)[-800:]}")
-    out = json.loads(done.stdout)
-    cost = float(out.get("total_cost_usd") or 0.0)
-    if schema is None:
-        if out.get("is_error") or not str(out.get("result") or "").strip():
-            raise RuntimeError(f"no answer: {str(out.get('result'))[:800]}")
-        return str(out["result"]), cost
-    if out.get("is_error") or not isinstance(out.get("structured_output"), dict):
-        raise RuntimeError(f"no structured plan: {str(out.get('result'))[:800]}")
-    return out["structured_output"], cost
+        raise RuntimeError(f"grok exited {done.returncode}: {(done.stderr or done.stdout)[-800:]}")
+    return cd.grok_answer(cd.grok_object(done.stdout), structured=schema is not None)
 
 
-def run_claude(brief_path: Path, today: date) -> tuple[dict | str, float]:
-    prompt = PROMPT.read_text(encoding="utf-8").replace("{BRIEF}", str(brief_path)).replace("{DAY}", today.isoformat())
-    return claude_call(prompt, cd.SCHEMA)
+def run_grok(brief_path: Path, today: date) -> tuple[dict | str, float]:
+    """Retired picker. The schedule does not call this. The checker uses VERIFY_PROMPT."""
+    prompt = GROK_PROMPT.read_text(encoding="utf-8").replace("{BRIEF}", str(brief_path)).replace("{DAY}", today.isoformat())
+    return grok_call(prompt, cd.SCHEMA)
 
 
 async def run_gemma(brief_path: Path, today: date) -> tuple[dict, float]:
@@ -298,7 +381,10 @@ async def plan(today: date, *, research: bool, trial: bool = False) -> int:
         print(f"plan for {today} already written: {plan_path}")
         return 0
     try:
-        raw, cost = await run_gemma(brief_path, today) if DESK == "gemma" else run_claude(brief_path, today)
+        if DESK == "gemma":
+            raw, cost = await run_gemma(brief_path, today)
+        else:
+            raise RuntimeError("only Gemma writes a shadow plan; Grok verifies it")
     except Exception as exc:                                  # noqa: BLE001 -- logged, no plan today
         log(f"{DESK}_plan_error", "", f"{type(exc).__name__}: {exc}"[:500])
         print(f"no plan: {exc}")
@@ -333,7 +419,9 @@ def load_plan(day: date) -> cd.Plan | None:
 
 
 async def daily_bars(client: httpx.AsyncClient, symbols: list[str], start: date, end: date) -> dict[str, dict[date, cd.Bar]]:
-    raw = await alpaca_bars.bars(symbols, client, timeframe="1Day", feed="sip",
+    # This account's SIP feed refuses bars newer than 15 minutes (alpaca_bars).
+    # Settle runs on the session that just closed, so the request uses IEX.
+    raw = await alpaca_bars.bars(symbols, client, timeframe="1Day", feed="iex",
                                  start=datetime.combine(start, datetime.min.time(), sat.ET),
                                  end=datetime.combine(end, datetime.max.time().replace(microsecond=0), sat.ET))
     out: dict[str, dict[date, cd.Bar]] = {}
@@ -356,7 +444,7 @@ async def settle(now: datetime) -> int:
                          | {c.symbol for p in plans.values() if p for c in p.calls} | {"SPY", "QQQ"})
         bars = await daily_bars(client, symbols, cd.FIRST_DAY - timedelta(days=7), last_done) if days or book.marks else {}
     for d in days:
-        book = cd.play(book, plans[d], {s: v[d] for s, v in bars.items() if d in v}, d)
+        book = cd.play(book, cd.for_settle(plans[d]), {s: v[d] for s, v in bars.items() if d in v}, d)
     if days:
         save_json(book_path(), book.model_dump_json(indent=1))
     print(report(book, bars))
@@ -386,37 +474,124 @@ def report(book: cd.Book, bars: dict[str, dict[date, cd.Bar]]) -> str:
 # --- sunday ---------------------------------------------------------------------------------
 
 async def sunday(today: date) -> int:
-    """The weekend's news and the week ahead, written by Claude for the operator. No calls."""
+    """The weekend's news and the week ahead, written by Grok. No calls and no orders."""
     brief, _ = await build_brief(today)
-    brief_path = DIR / "briefs" / f"sunday-{today}.md"
+    brief_path = SUNDAY_DIR / "briefs" / f"sunday-{today}.md"
     save_json(brief_path, brief)
     prompt = (SUNDAY_PROMPT.read_text(encoding="utf-8").replace("{BRIEF}", str(brief_path))
               .replace("{DAY}", today.isoformat()))
     try:
-        text, cost = claude_call(prompt, None)
-    except Exception as exc:                                  # noqa: BLE001 -- logged, no read this week
-        log("claude_sunday_error", "", f"{type(exc).__name__}: {exc}"[:500])
+        text, cost = grok_call(prompt, None, turns=VERIFY_TURNS)
+    except (Exception, SystemExit) as exc:                   # noqa: BLE001 -- logged, no read this week
+        log("grok_sunday_error", "", f"{type(exc).__name__}: {exc}"[:500])
         print(f"no Sunday read: {exc}")
         return 1
-    page = f"*Written {datetime.now(sat.ET):%a %Y-%m-%d %H:%M} ET by Claude (research only, no orders).*\n\n{text}\n"
-    save_json(DIR / "sunday" / f"{today}.md", page)
+    if not isinstance(text, str) or not text.strip():
+        log("grok_sunday_error", "", "empty Sunday read")
+        print("no Sunday read: empty")
+        return 1
+    written = f"{datetime.now(sat.ET):%a %Y-%m-%d %H:%M}"
+    page = f"*Written {written} ET by Grok. Research only, no orders.*\n\n{text}\n"
+    save_json(SUNDAY_DIR / "sunday" / f"{today}.md", page)
     save_json(SUNDAY_LATEST, page)
-    log("claude_sunday", "", f"list cost ${cost:.2f}; {str(text)[:300]}")
+    log("grok_sunday", "", f"list cost ${cost:.2f}; {text[:240]}")
     print(page)
     return 0
 
 
+# --- verify ---------------------------------------------------------------------------------
+
+def _verdicts(raw: dict) -> list[cd.Verdict]:
+    found = []
+    for row in raw.get("calls") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            found.append(cd.Verdict.model_validate(row))
+        except ValueError:
+            continue
+    return found
+
+
+def verify_one(name: str, folder: Path, today: date) -> str:
+    """Approve or disapprove one desk's plan. Returns a one-line result. Raises if Grok does not answer."""
+    path = folder / "plans" / f"{today}.json"
+    if not path.exists():
+        return f"{name}: no plan for {today}"
+    plan = cd.Plan.model_validate_json(path.read_text(encoding="utf-8"))
+    if plan.verified:
+        return f"{name}: already verified, {len(plan.calls)} calls kept"
+    brief = folder / "briefs" / f"{today}.md"
+    prompt = (VERIFY_PROMPT.read_text(encoding="utf-8").replace("{DAY}", today.isoformat())
+              .replace("{DESK}", name)
+              .replace("{BRIEF}", str(brief))
+              .replace("{PLAN}", plan.model_dump_json()))
+    raw, cost = grok_call(prompt, cd.VERIFY_SCHEMA, turns=VERIFY_TURNS)
+    if not isinstance(raw, dict):
+        raise RuntimeError("verify did not return a plan")
+    out = cd.apply_verdicts(plan, _verdicts(raw), market_ok=bool(raw.get("approve_market")),
+                            market_why=str(raw.get("market_why") or ""))
+    save_json(path, out.model_dump_json(indent=1))
+    kept = [c.symbol for c in out.calls]
+    log(f"grok_verify_{name}", ",".join(kept),
+        f"{len(kept)} approved, {len(out.skipped)} refused, list cost ${cost:.2f}")
+    return f"{name}: verified, kept {kept}, refused {len(out.skipped)}, list cost ${cost:.2f}"
+
+
+def verify_status(today: date) -> int:
+    """Exit 1 when a written plan has not been verified. Does not call Grok."""
+    bad = 0
+    for name, folder in DESKS.items():
+        if name not in CHECKED:
+            continue
+        path = folder / "plans" / f"{today}.json"
+        if not path.exists():
+            print(f"{name}: no plan for {today}")
+            continue
+        plan = cd.Plan.model_validate_json(path.read_text(encoding="utf-8"))
+        if plan.verified:
+            print(f"{name}: verified, {len(plan.calls)} calls will play")
+        else:
+            print(f"{name}: NOT verified -- settle will not play these calls")
+            bad = 1
+    return bad
+
+
+def verify(today: date) -> int:
+    """Grok signs Gemma's plan. A desk he cannot reach stays unsigned. Claude is retired."""
+    failed = 0
+    for name, folder in DESKS.items():
+        if name not in CHECKED:
+            continue
+        try:
+            print(verify_one(name, folder, today))
+        except (Exception, SystemExit) as exc:               # noqa: BLE001 -- one desk must not block the other
+            failed = 1
+            message = f"{type(exc).__name__}: {exc}"[:400]
+            log(f"grok_verify_{name}_error", "", message)
+            print(f"{name}: Grok could not verify ({message})")
+    return failed
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=("brief", "plan", "settle", "trial", "sunday"))
+    p.add_argument("mode", choices=("brief", "plan", "settle", "trial", "sunday", "verify"))
     p.add_argument("--desk", choices=tuple(DESKS), default="claude")
+    p.add_argument("--check", action="store_true", help="verify: report only, do not call Grok")
     a = p.parse_args()
     mode, DESK, DIR = a.mode, a.desk, DESKS[a.desk]
-    if mode == "sunday" and DESK != "claude":
-        raise SystemExit("the Sunday read is Claude's")
     now = datetime.now(sat.ET)
+    if mode == "verify":
+        raise SystemExit(verify_status(now.date()) if a.check else verify(now.date()))
     if mode == "sunday":
         raise SystemExit(asyncio.run(sunday(now.date())))
+    if DESK == "claude":
+        print("Claude is retired. Grok verifies Gemma's plan: python scripts/claude_desk.py verify")
+        raise SystemExit(0)
+    if DESK == "grok":
+        print("Grok does not run a shadow book. He verifies Gemma's plan: "
+              "python scripts/claude_desk.py verify")
+        raise SystemExit(0)
     if mode == "settle":
         raise SystemExit(asyncio.run(settle(now)))
     raise SystemExit(asyncio.run(plan(now.date(), research=mode != "brief", trial=mode == "trial")))

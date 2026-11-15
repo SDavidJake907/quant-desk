@@ -17,3 +17,9 @@ tmp/
 
 # PineTS install (tools/pinets)
 node_modules/
+
+# Local quote reader. Stays on this PC and is not part of the published desk.
+scripts/moomoo_read.py
+src/scanner/sources/moomoo_quote.py
+src/scanner/sources/moomoo_note.py
+tests/test_moomoo_quote.py

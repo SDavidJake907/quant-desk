@@ -105,18 +105,36 @@ async def _get(client: httpx.AsyncClient, url: str) -> str:
         return ""
 
 
+async def collect(client: httpx.AsyncClient, *, now: datetime | None = None
+                  ) -> tuple[tuple[Post, ...], int, int]:
+    """Truth Social (24h) and White House releases (48h), newest first.
+
+    Returns (posts, feeds that returned nothing, feeds tried). A feed outage is a
+    count, not an exception: the position card says when the feed is down.
+    """
+    now = now or datetime.now(timezone.utc)
+    sources = [("truth", TRUTH_FEED, 24.0),
+               *[(f"white_house:{kind}", url, 48.0) for kind, url in WH_FEEDS.items()]]
+    failed = 0
+    found: list[Post] = []
+    for source, url, hours in sources:
+        xml = await _get(client, url)
+        if not xml:
+            failed += 1
+            continue
+        found.extend(parse_rss(xml, source=source, now=now, hours=hours))
+    seen, out = set(), []
+    for post in sorted(found, key=lambda p: p.when, reverse=True):
+        if post.text.lower() not in seen:
+            seen.add(post.text.lower())
+            out.append(post)
+    return tuple(out), failed, len(sources)
+
+
 async def posts(client: httpx.AsyncClient, *, now: datetime | None = None) -> tuple[Post, ...]:
     """Truth Social (24h) and White House releases (48h), newest first."""
-    now = now or datetime.now(timezone.utc)
-    found = list(parse_rss(await _get(client, TRUTH_FEED), source="truth", now=now, hours=24))
-    for kind, url in WH_FEEDS.items():
-        found += parse_rss(await _get(client, url), source=f"white_house:{kind}", now=now, hours=48)
-    seen, out = set(), []
-    for p in sorted(found, key=lambda p: p.when, reverse=True):
-        if p.text.lower() not in seen:
-            seen.add(p.text.lower())
-            out.append(p)
-    return tuple(out)
+    found, _, _ = await collect(client, now=now)
+    return found
 
 
 async def schedule(client: httpx.AsyncClient, *, days: set[date]) -> tuple[ScheduleItem, ...]:

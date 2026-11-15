@@ -28,6 +28,7 @@ from scanner.config import settings
 from scanner.execution.preflight import run, banner
 from scanner.execution.safety import kill_switch_active, inspect, format_report
 from scanner.execution.alpaca import Alpaca
+from scanner.sources.alpaca_bars import latest_quote_status, recent_sip_verdict
 
 
 async def main() -> int:
@@ -58,6 +59,17 @@ async def main() -> int:
         except Exception as exc:
             print(f"  ! broker unreachable: {exc}")
             problems.append("broker unreachable — cannot confirm account status")
+
+        # The tests were measured on SIP. A free plan refuses the newest SIP
+        # quotes. Paper scans stay on the feed that works. Funding waits.
+        code, body = await latest_quote_status("SPY", client)
+        verdict = recent_sip_verdict(code, body)
+        print(f"  recent SIP quote: {verdict} (HTTP {code})")
+        if verdict != "ok":
+            problems.append(
+                "recent SIP quote did not succeed — paper scans stay on the working "
+                "feed; do not fund until a SIP quote succeeds"
+            )
 
     if problems:
         print(f"\nLIVE READINESS CHECK FAILED ({len(problems)} problem(s)):")

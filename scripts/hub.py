@@ -48,7 +48,8 @@ import httpx
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from scanner.execution import ownership
+from scanner.execution import ownership, plan_run
+from scanner.execution import satellite as sat
 from scanner.ops import runlog
 from scanner.config import settings
 from scanner.execution import continuity
@@ -226,11 +227,15 @@ async def account_section() -> tuple[list[str], list[str], bool | None]:
             orders = await broker._get("/v2/orders", status="open", limit=200)
             naked = await broker.unprotected_positions()
             # Momentum holds carry no stop by design (WORKLIST §40): listing
-            # them here daily would bury a real naked position.
-            owner_map = ownership.owners(await broker._get(
-                "/v2/orders", status="all", limit=500, nested="true"))
-            naked = tuple(p for p in naked if ownership.owner(p.symbol, owner_map)
-                          not in POLICY.stopless_strategies)
+            # them here daily would bury a real naked position. A rules-book
+            # position opened on or after the 10-7 book also has no stop.
+            history = await broker._get("/v2/orders", status="all", limit=500, nested="true")
+            owner_map = ownership.owners(history)
+            entered = plan_run.entry_dates(history, (ownership.GEMMA,))
+            naked = tuple(p for p in naked
+                          if ownership.owner(p.symbol, owner_map) not in POLICY.stopless_strategies
+                          and not sat.rules_book_has_no_stop(
+                              ownership.owner(p.symbol, owner_map), entered.get(p.symbol)))
             market_open = await broker.market_open()
     except BrokerError as exc:
         out.append(f"  {YELLOW}broker unreachable: {exc}{RESET}")

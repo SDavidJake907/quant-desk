@@ -41,8 +41,9 @@ def test_the_book_has_its_own_ids_and_the_sleeves_add_to_100():
     assert ownership.strategy_of("sml-ABCD-123") == ownership.SMALL
     p = TradingPolicy()
     assert (p.small_allocation_pct, p.small_max_positions) == (10.0, 4)
-    assert (p.gemma_allocation_pct, p.gemma_max_positions) == (30.0, 5)
-    assert p.own_sleeves_pct == 100.0
+    assert (p.gemma_allocation_pct, p.gemma_max_positions) == (20.0, 5)   # 30 -> 20 on 2026-11-02 (sweep)
+    assert p.swing_allocation_pct == 0.0  # new sweep buys off 2026-11-10; open stops stay
+    assert p.own_sleeves_pct == 55.0      # core 25 + rules 20 + small 10; the other 45% is cash
 
 
 def test_queue_item_names_the_rule_and_the_plan_defaults():

@@ -17,9 +17,17 @@ candles and must be fresh (ps.extended_trend); overnight Yahoo has none, so noth
 then. Sells outside regular hours are limit orders (bookorders.sell with the session).
 
 FROM 2026-10-26, THE CORE-AND-SATELLITE PLAN (execution/satellite.py, plan_run.py): the
-peak-sell and the profit lock are off; each pass runs the plan's exits (hard stop, and in
-the last 10 minutes the trailing / time / earnings exits), and in regular hours from 10:00
-ET sends Gemma's queued buys and the SPY core. READY marks are still shown, as information.
+global peak-sell switch stays off, so small caps, picks, the sweep, and QQQ do not sell
+on a 5-minute downturn. FROM 2026-11-14 a 10-7 name does. It is already marked ready at
++2% with 4 of 6 readings, and this pass sells when that trend turns down while the
+position is still in profit. A fresh premarket or after-hours price can send that limit.
+Overnight has no candle, so that session does not sell on trend. Each pass also runs the
+plan's exits (the broker stop, and in the last 10 minutes the profit lock, the trail,
+the time stop, and earnings). The 10-7 close lock stays in the regular close. The S&P
+extension and the 15-session hold can still go out after hours. Regular hours from 10:00
+ET send the queued buys and the index core. FROM 2026-11-10 a buy or a plan sell that is
+already due can also go out from 16:00 to 20:00 ET as a day limit. Premarket and
+overnight do not send those plan orders.
 """
 
 from __future__ import annotations
@@ -53,8 +61,8 @@ from scanner.ops import peak_sell as ps
 from scanner.signals.candles24 import yahoo_5m
 
 MARKS = Path("data/monitor/peak_marks.json")
-#: Off from 2026-10-26 (the core-and-satellite plan, execution/satellite.py): its +2%
-#: trigger caught bounces, not tops; the plan's trailing exit (execution/plan_run.py) sells.
+#: Global switch. Off since 2026-10-26 because the +2% trigger caught bounces on every
+#: book. The 10-7 book sells anyway, through peak_sell.rules_peak_sell.
 PEAK_SELL = False
 SELL_QUEUE = Path(sell_queue.PATH)
 OUT = Path("logs/peak_watch")
@@ -89,7 +97,11 @@ async def readings_for(client, positions, stops: dict, log,
         if session != sessions.REGULAR:
             r = dataclasses.replace(r, values={**r.values, "trend_5m": ps.extended_trend(every, now)})
         atr = average_true_range_pct(daily[s]) if s in daily else None
-        out.append(dataclasses.replace(r, stop_note=ps.stop_note(price, stops.get(s), atr)))
+        close = float(daily[s].closes[-1]) if s in daily and daily[s].closes else 0.0
+        # stop_note keeps the percent of the close. The card's count uses the live price.
+        out.append(dataclasses.replace(
+            r, stop_note=ps.stop_note(price, stops.get(s), atr),
+            atr_pct=ps.atr_percent_of(atr, close, price)))
     return out
 
 
@@ -153,12 +165,33 @@ async def queue_pass(broker, client, positions, book_of, open_orders, session: s
     return alerts
 
 
+async def write_card(session: str, client, positions, readings, stops, book_of, log=print) -> None:
+    """The position card. A failure here never changes an order this pass already sent."""
+    try:
+        import position_card as pc
+        if await pc.refresh(client, positions, readings, stops, book_of, session=session):
+            log("  position card written (logs/positions/latest.md)")
+    except Exception as exc:
+        log(f"  position card skipped ({type(exc).__name__}: {exc})")
+
+
 async def main(dry: bool) -> int:
     now = datetime.now(EXCHANGE_TZ)
     async with httpx.AsyncClient(timeout=60) as client:
         session = await sessions.current(Alpaca(settings.alpaca_key_id, settings.alpaca_secret_key, client))
     if session == sessions.CLOSED:
-        print(f"{now:%H:%M} ET: market closed -- nothing to watch")
+        print(f"{now:%H:%M} ET: market closed -- no orders")
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                broker = Alpaca(settings.alpaca_key_id, settings.alpaca_secret_key, client)
+                positions = await broker._get("/v2/positions") or []
+                orders = await broker._get("/v2/orders", status="all", limit=500, nested="true") or []
+                stops = grv.live_stops(orders)
+                owner_map = ownership.owners(orders)
+                book_of = {p["symbol"]: ownership.owner(p["symbol"], owner_map) for p in positions}
+                await write_card(session, client, positions, [], stops, book_of)
+        except Exception as exc:
+            print(f"  position card skipped ({type(exc).__name__}: {exc})")
         return 0
     lines: list[str] = []
 
@@ -180,16 +213,23 @@ async def main(dry: bool) -> int:
         rs = await readings_for(client, watched, stops, log, session)
         prices = {p["symbol"]: float(p["current_price"]) for p in watched}
         marks, ready, sell = ps.update_marks(load_marks(), rs, now=f"{now:%m-%d %H:%M} ET", prices=prices)
+        entered = plan_run.entry_dates(orders, (GEMMA,))
         for r in rs:
             stage = "SELL" if r.symbol in sell else "READY" if r.symbol in marks else "-"
             trend = r.values.get("trend_5m")
             log(f"  {r.symbol:<6} {book_of[r.symbol]:<5} P/L {r.pl_pct:+6.2f}%  {r.score()}/6  5m trend "
                 f"{'UP' if trend == 1.0 else 'DOWN' if trend == 0.0 else 'n/a'}  {stage}")
         for s in ready:
-            log(f"  READY {s}: in profit with >= {ps.MIN_MET} of 6 peak checks -- sells when the 5m trend turns down")
-            alerts.append(f"{s} READY to sell (peak checks)")
-        # The plan (2026-10-26) removed the 5-minute peak-sell: READY is shown, nothing sells on it.
-        for s in (sell if PEAK_SELL else ()):
+            if PEAK_SELL or ps.rules_peak_sell(book_of[s], entered.get(s)):
+                log(f"  READY {s}: in profit with >= {ps.MIN_MET} of 6 peak checks -- sells when the 5m trend turns down")
+                alerts.append(f"{s} READY to sell (peak checks)")
+            else:
+                log(f"  READY {s}: in profit with >= {ps.MIN_MET} of 6 peak checks -- this book keeps its own exit")
+        # 10-7 names sell on the downturn. The global switch stays off for every other book.
+        gone: set[str] = set()
+        for s in sell:
+            if not (PEAK_SELL or ps.rules_peak_sell(book_of[s], entered.get(s))):
+                continue
             m = marks.get(s, {})
             why = (f"peak-sell: READY since {m.get('ready_at')} at {m.get('ready_price')}, "
                    f"the 5-minute trend turned down while in profit")
@@ -198,28 +238,31 @@ async def main(dry: bool) -> int:
                 continue
             ok = await sell_position(broker, client, s, book_of[s], why, open_orders, session)
             log(f"  {status(ok)} {book_of[s]} {s}: {why}")
+            gone.add(s)
             if ok:
                 alerts.append(f"Sell sent for {s} ({book_of[s]}) -- took profit, trend turned after READY")
                 marks.pop(s, None)
-        gone = set(sell) if not dry else set()
         alerts += await queue_pass(broker, client, positions, book_of, open_orders, session, dry, log)
         # The plan's exits replace the profit lock; its buys and the SPY core go out from 10:00 ET.
         alerts += await plan_run.exit_pass(broker, client, [p for p in watched if p["symbol"] not in gone],
                                            book_of, orders, open_orders, session, now, dry, log, sell_position)
         alerts += await plan_run.core_stop_pass(broker, client, positions, owner_map, orders, open_orders,
-                                                now, dry, log, gtr.POLICY)
-        if session == sessions.REGULAR:
+                                                now, dry, log, gtr.POLICY, session=session)
+        # Regular hours from 10:00, and after hours when a buy is still due.
+        # Premarket and overnight do not buy.
+        if sessions.accepts_due_orders(session):
             alerts += await plan_run.buy_pass(broker, client, positions, owner_map, open_orders, now,
-                                              dry, log, gtr.POLICY)
+                                              dry, log, gtr.POLICY, session=session)
             alerts += await plan_run.buy_pass(broker, client, positions, owner_map, open_orders, now,
-                                              dry, log, gtr.POLICY, strategy=SMALL)
+                                              dry, log, gtr.POLICY, strategy=SMALL, session=session)
             alerts += await plan_run.core_pass(broker, client, positions, owner_map, open_orders, now,
-                                               dry, log, gtr.POLICY, orders=orders)
+                                               dry, log, gtr.POLICY, orders=orders, session=session)
         if alerts and not dry:
             body = "; ".join(alerts)
             await notify.send(client, server=settings.ntfy_server, topic=settings.ntfy_topic,
                               title="Quant-desk peak watch", message=body, priority="high", tags=("moneybag",))
             notify.toast("Quant-desk peak watch", body)
+        await write_card(session, client, positions, rs, stops, book_of, log)
     if not dry:
         MARKS.parent.mkdir(parents=True, exist_ok=True)
         MARKS.write_text(json.dumps(marks, indent=1), encoding="utf-8")

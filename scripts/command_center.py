@@ -54,14 +54,14 @@ AK = dt.timezone(dt.timedelta(hours=-8))  # display only; AKDT/AKST handled belo
 # Book identity -- the same prefixes execution/ownership.py uses
 # ----------------------------------------------------------------------------
 BOOKS = {
-    "cor": "SPY core",
+    "cor": "Index core",
     "gem": "Rules book",          # the `gem-` ids are kept from Gemma's book (2026-10-26)
     "sml": "Small caps",
     "orb": "ORB",
     "pck": "Picks",
     "man": "Manual",
     "mom": "Momentum",
-    "smc": "Sweep (paused)",
+    "smc": "Sweep",              # new buys off 2026-11-10 (sleeve 0); open stops stay
 }
 #: Books held without a stop by design (policy.stopless_strategies): never flagged as naked.
 #: "SPY core" removed 2026-10-30: it carries a stop now (plan_run.core_stop_pass).
@@ -70,7 +70,22 @@ STOPLESS = {"Momentum"}
 #: placeholders (they exit on trailing rules), so their charts draw no target.
 TARGET_BOOKS = {"ORB"}
 #: Tiles shown even when the book is empty.
-MAIN_BOOKS = ("SPY core", "Rules book", "Small caps", "ORB")
+MAIN_BOOKS = ("Index core", "Rules book", "Small caps", "Sweep")
+
+
+def rules_hold_without_stop(book: str, opened: str | None, root: Path) -> bool:
+    """A rules-book position bought on or after the 10-7 book has no stop on purpose."""
+    if book != "Rules book" or not opened:
+        return False
+    try:
+        sys.path.insert(0, str(root / "src"))
+        from datetime import date
+
+        from scanner.execution.satellite import rules_book_has_no_stop  # type: ignore
+
+        return rules_book_has_no_stop(book, date.fromisoformat(str(opened)[:10]))
+    except Exception:
+        return False
 
 
 def slot_limits(root: Path) -> dict:
@@ -78,12 +93,13 @@ def slot_limits(root: Path) -> dict:
     try:
         sys.path.insert(0, str(root / "src"))
         from scanner.execution.policy import TradingPolicy  # type: ignore
+        from scanner.execution.satellite import RULES_TOP_N  # type: ignore
 
         p = TradingPolicy()
-        caps = (p.gemma_max_positions, p.small_max_positions, p.orb_max_positions)
+        caps = (RULES_TOP_N, p.small_max_positions, p.max_positions)
     except Exception:
-        caps = (5, 4, 3)
-    return {"Rules book": (("gem",), caps[0]), "Small caps": (("sml",), caps[1]), "ORB": (("orb",), caps[2])}
+        caps = (5, 4, 12)
+    return {"Rules book": (("gem",), caps[0]), "Small caps": (("sml",), caps[1]), "Sweep": (("smc",), caps[2])}
 
 # The running scheduled tasks and how stale each may get before it is flagged.
 # (log name, label, max age in hours on a weekday, runs on weekends?, judged only in session?)
@@ -96,10 +112,10 @@ TASKS = [
     ("flatten", "Flatten before closures", 26, False, False),
     ("preclose", "Pre-close four-sign check 15:40 ET", 26, False, False),
     ("gemma_desk_plan", "Gemma desk plan 08:30 ET (shadow)", 26, False, False),
-    ("claude_plan", "Claude desk plan 08:45 ET (shadow)", 26, False, False),
-    ("claude_settle", "Claude desk settle 17:20 ET", 26, False, False),
+    ("grok_desk_plan", "Grok verifies Gemma 10:15 ET", 26, False, False),
+    ("grok_desk_settle", "Grok verify check 17:15 ET (no model)", 26, False, False),
     ("gemma_desk_settle", "Gemma desk settle 17:25 ET", 26, False, False),
-    ("claude_sunday", "Claude Sunday read 18:30 ET Sun", 170, True, False),
+    ("grok_sunday", "Grok Sunday read 18:30 ET Sun", 170, True, False),
     ("data", "Intraday bars 13:00", 26, False, False),
     ("outcomes", "Outcomes, standings, penny shadow 13:30", 26, False, False),
 ]
@@ -331,8 +347,7 @@ def read_freeze(root: Path) -> str | None:
 def desk_rows(root: Path) -> str:
     """One table row per research desk from its book.json (read only)."""
     rows = []
-    for name, path in (("Claude", root / "data" / "claude" / "book.json"),
-                       ("Gemma", root / "data" / "gemma_desk" / "book.json")):
+    for name, path in (("Gemma", root / "data" / "gemma_desk" / "book.json"),):
         try:
             b = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -551,7 +566,9 @@ def gather(root: Path, broker: Broker | None) -> dict:
 
     # --- safety ----------------------------------------------------------------
     d["kill"], d["kill_path"] = kill_switch(root)
-    d["naked"] = [p["symbol"] for p in positions if not p["stop_live"] and p["book"] not in STOPLESS]
+    d["naked"] = [p["symbol"] for p in positions
+                  if not p["stop_live"] and p["book"] not in STOPLESS
+                  and not rules_hold_without_stop(p["book"], d["opened"].get(p["symbol"]), root)]
     d["freeze"] = read_freeze(root)
     d["tasks"] = task_health(root, now)
 
@@ -560,7 +577,11 @@ def gather(root: Path, broker: Broker | None) -> dict:
     for name, p in (("standings", root / "logs" / "competition" / "standings.md"),
                     ("penny", root / "logs" / "shadow" / "penny.md"),
                     ("preclose", root / "logs" / "preclose" / "latest.md"),
-                    ("sunday", root / "logs" / "claude" / "sunday.md")):
+                    ("sunday", root / "logs" / "grok" / "sunday.md"
+                     if (root / "logs" / "grok" / "sunday.md").exists()
+                     else root / "logs" / "claude" / "sunday.md"),
+                    ("scorecard", root / "logs" / "scorecard" / "latest.md"),
+                    ("position_card", root / "logs" / "positions" / "latest.md")):
         d[name] = md_to_html(p.read_text(encoding="utf-8", errors="replace")) if p.exists() else None
         d[name + "_time"] = (
             dt.datetime.fromtimestamp(p.stat().st_mtime, tz=dt.timezone.utc).astimezone(now.tzinfo) if p.exists() else None
@@ -704,7 +725,8 @@ def render(d: dict) -> str:
     elif d["naked"]:
         pills.append(status_pill("critical", f"No live stop: {', '.join(d['naked'])}", "protect.py arms these every 30 min in the session"))
     else:
-        held = [p for p in d["positions"] if p["book"] not in STOPLESS]
+        held = [p for p in d["positions"] if p["book"] not in STOPLESS
+                and not rules_hold_without_stop(p["book"], d["opened"].get(p["symbol"]), d["root"])]
         pills.append(status_pill("good", f"Every position has a live stop ({len(held)})"))
 
     # daily loss
@@ -758,9 +780,14 @@ def render(d: dict) -> str:
         comp_chart = f"<p class='muted'>No portfolio history ({esc(d['broker_error'] or 'empty')}).</p>"
     standings = d["standings"] or "<p class='muted'>logs/competition/standings.md not found — run <code>python scripts/competition.py standings</code>.</p>"
     penny = d["penny"] or "<p class='muted'>logs/shadow/penny.md not found — run <code>python scripts/penny_shadow.py</code>.</p>"
-    sunday = d["sunday"] or "<p class='muted'>No Sunday read yet — Claude writes it Sundays 18:30 ET.</p>"
+    scorecard = d["scorecard"] or "<p class='muted'>No scorecard yet — written after the close by the outcomes task (13:30 AK).</p>"
+    sunday = d["sunday"] or "<p class='muted'>No Sunday read yet — Grok writes it Sundays 18:30 ET.</p>"
     desks = desk_rows(d["root"])
     preclose = d["preclose"] or "<p class='muted'>No pre-close check yet — it runs 15:40 ET on session days.</p>"
+    position_card = d["position_card"] or (
+        "<p class='muted'>No position card yet. Peak watch writes it about every 30 minutes, "
+        "including when the market is shut.</p>")
+    card_t = f" · {ago(d['position_card_time'], now)}" if d.get("position_card_time") else ""
 
     # ---- positions ---------------------------------------------------------------
     if d["positions"]:
@@ -773,7 +800,8 @@ def render(d: dict) -> str:
                 stop_cell = (f"<td class='num'>{fnum(p['stop'])}</td>"
                              f"<td><div class='dist {cls}' title='{dist:.2f}% above the stop'><div style='width:{w:.0f}%'></div></div>"
                              f"<span class='num small'>{dist:.1f}%</span></td>")
-            elif p["book"] in STOPLESS:
+            elif p["book"] in STOPLESS or rules_hold_without_stop(
+                    p["book"], d["opened"].get(p["symbol"]), d["root"]):
                 stop_cell = "<td colspan='2'><span class='muted small'>no stop by design</span></td>"
             else:
                 note = f"logged {fnum(p['logged_stop'])}, not armed" if p["logged_stop"] else "none"
@@ -798,7 +826,8 @@ def render(d: dict) -> str:
         pos_html = f"<p class='muted'>No open positions{(' — ' + esc(d['broker_error'])) if d['broker_error'] else ''}.</p>"
 
     charts = "".join(
-        cc_trades.position_chart({**p, "stopless": p["book"] in STOPLESS}, d["closes"].get(p["symbol"], []),
+        cc_trades.position_chart({**p, "stopless": p["book"] in STOPLESS or rules_hold_without_stop(
+            p["book"], d["opened"].get(p["symbol"]), d["root"])}, d["closes"].get(p["symbol"], []),
                                  d["targets"].get(p["symbol"]) if p["book"] in TARGET_BOOKS else None,
                                  d["opened"].get(p["symbol"]))
         for p in d["positions"]
@@ -840,8 +869,8 @@ def render(d: dict) -> str:
         tiles=tiles_html,
         comp_chart=comp_chart,
         comp_src=src(esc(d["series_src"])),
-        standings=standings, stand_t=esc(stand_t), penny=penny, preclose=preclose, sunday=sunday, desks=desks,
-        positions=pos_html,
+        standings=standings, stand_t=esc(stand_t), penny=penny, preclose=preclose, sunday=sunday, desks=desks, scorecard=scorecard,
+        positions=pos_html, position_card=position_card, card_t=esc(card_t),
         charts=f"<div class='pcs'>{charts}</div>" if charts else "",
         trade_summary=cc_trades.summary_html(cc_trades.book_summary(trades)),
         trade_hist=cc_trades.histogram_svg(trades),
@@ -1015,11 +1044,25 @@ TEMPLATE = """<!doctype html>
   </section>
 </div>
 
+<section class="card standings">
+  <h2>Scorecard: each book since the fresh start</h2>
+  <div class="cap">From the 10-30 close. Each book against what it is judged by over the same days; the sweep against its ghost; the acceleration shadow (records only).</div>
+  {scorecard}
+  <div class="src">Source: logs/scorecard/latest.md (scripts/book_scorecard.py, after the close)</div>
+</section>
+
 <section class="card">
   <h2>Open positions</h2>
   <div class="cap">Room to stop: how far price sits above the live stop (bar full at 10%; amber under 1.5%).</div>
   {positions}
   {pos_src}
+</section>
+
+<section class="card standings">
+  <h2>Each position: numbers, indicators, news</h2>
+  <div class="cap">Rewritten about every 30 minutes by peak watch{card_t}. The six readings with their thresholds, every Alpaca headline since 04:00 ET (the catalyst word list is named beside them), a company-news label for a lawsuit, an earnings date, or a takeover, and a President or White House post that names the symbol. On an energy name, a post about the oil market, a tanker, Iran, or Hormuz is included too. An X post is included only when it names the symbol. An oil-company name in a campaign line is left off. The label does not sell. An X post does not sell. Report only.</div>
+  {position_card}
+  <div class="src">Source: logs/positions/latest.md · logs/positions/held_news.json · logs/positions/polymarket.md · Alpaca news, Truth Social, whitehouse.gov, X</div>
 </section>
 
 <section class="card">
@@ -1041,21 +1084,22 @@ TEMPLATE = """<!doctype html>
 </section>
 
 <section class="card standings">
-  <h2>Sunday read (Claude, research only)</h2>
+  <h2>Sunday read (Grok, research only)</h2>
+  <div class="cap">Grok writes the page. It never suggests a trade. An older page may still be the last Claude read until the next Sunday.</div>
   {sunday}
-  <div class="src">Source: logs/claude/sunday.md</div>
+  <div class="src">Source: logs/grok/sunday.md, or logs/claude/sunday.md until Grok writes the next one</div>
 </section>
 
 <section class="card">
-  <h2>Research desks (shadow books, never trade)</h2>
-  <div class="cap">Claude and Gemma get the same brief each morning; their calls play in $30,000 paper sleeves. Judged 2026-12-31 vs SPY and the rules book (FREEZE.md pass rule).</div>
+  <h2>Research desk (shadow book, never trades)</h2>
+  <div class="cap">Gemma writes calls from the morning brief. Grok approves or disapproves every call before settle plays it. He adds no symbol and keeps no book. Claude's desk is retired. Judged 2026-12-31 vs SPY and the rules book (FREEZE.md pass rule).</div>
   {desks}
-  <div class="src">Source: data/claude/book.json, data/gemma_desk/book.json</div>
+  <div class="src">Source: data/gemma_desk/book.json. A plan plays only after its verified flag is set. data/claude/book.json is the retired record.</div>
 </section>
 
 <section class="card standings">
   <h2>Pre-close check: four signs to sell</h2>
-  <div class="cap">15:40 ET. Chart (under the 50-day and the 20-day low), market (2 of 3: VIXY spike, 8+ sectors down, HYG down), a catalyst headline, MACD under its signal. Only the SPY core sells, when losing and all four confirm; the rest is reported.</div>
+  <div class="cap">15:40 ET. Chart (under the 50-day and the 20-day low), market (2 of 3: VIXY spike, 8+ sectors down, HYG down), a catalyst headline, MACD under its signal. Only the index core (SPY, QQQ) sells, when losing and all four confirm; the rest is reported.</div>
   {preclose}
   <div class="src">Source: logs/preclose/latest.md</div>
 </section>

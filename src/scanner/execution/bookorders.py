@@ -17,13 +17,14 @@ from scanner.config import settings
 import asyncio
 
 from scanner.execution import extended, manual, picks, profit_lock
+from scanner.execution import satellite as sat
 from scanner.execution.alpaca import BrokerError, round_tick
 from scanner.execution.audit import NO_TARGET_MULTIPLE, append_event
 from scanner.execution.flatten_run import close_when_released
 from scanner.execution.ownership import prefix_for
 from scanner.execution.policy import TradingPolicy
 from scanner.execution.provenance import build_id
-from scanner.execution.sessions import REGULAR
+from scanner.execution.sessions import AFTER, REGULAR
 from scanner.execution.sizing import Sizing, size_position
 from scanner.features.bars import fetch_bars
 from scanner.features.intraday import fetch_intraday, max_range
@@ -54,6 +55,82 @@ def target_price(*, limit: float, stop: float, reward_risk: float,
     return round_tick(limit * ceiling)
 
 
+def limit_entry(symbol: str, shares: int, limit: float, client_order_id: str) -> dict:
+    """A day limit buy with no stop and no target. The rules book's 10-7 positions
+    are sold by their close exits, not by a broker bracket."""
+    if shares < 1:
+        raise ValueError("size came out at zero shares")
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    return {
+        "symbol": symbol,
+        "qty": str(shares),
+        "side": "buy",
+        "type": "limit",
+        "limit_price": f"{round_tick(limit):.2f}",
+        "time_in_force": "day",
+        "client_order_id": client_order_id,
+        "extended_hours": False,
+    }
+
+
+async def buy_rotation(broker, client, symbol: str, *, strategy: str, sleeve: float,
+                       room: float, slots: int, policy: TradingPolicy, reason: str,
+                       session: str = REGULAR) -> Bought:
+    """One equal slot of the rules sleeve, as a limit buy.
+
+    The buy order itself has no stop leg: the fill has not happened, and an
+    after-hours order cannot carry one. The intent records the full-slot stop
+    (2.5 ATR, never more than 8% under the limit) so protect.py can arm it
+    once the shares are held. A missing after-hours print is not logged as a
+    refusal: the queue retries."""
+    if session == AFTER:
+        live = await extended.price(symbol, client, session)
+        if live is None:
+            return Bought(symbol=symbol, ok=False, message="no fresh after price")
+    elif session != REGULAR:
+        return Bought(symbol=symbol, ok=False, message=f"{session} orders stay off")
+    else:
+        live = None
+    try:
+        last, atr_pct = await price_and_atr(symbol, client)
+        if live is not None:
+            last = live
+        if last <= 0:
+            raise ValueError("no positive price")
+        limit = round_tick(last * (1 + policy.entry_limit_offset_pct / 100))
+        shares = sat.slot_shares(dollars=sleeve / slots if slots else 0.0, room=room, limit=limit)
+        stop = round_tick(sat.rotation_stop(limit, atr_pct))
+    except Exception as exc:                               # noqa: BLE001
+        log(f"{strategy}_refused", symbol, f"cannot price: {exc}", policy)
+        return Bought(symbol=symbol, ok=False, message=f"cannot price: {exc}")
+    if shares < 1:
+        log(f"{strategy}_refused", symbol, "slot smaller than one share", policy)
+        return Bought(symbol=symbol, ok=False, message="slot smaller than one share")
+    now = datetime.now().astimezone()
+    coid = f"{prefix_for(strategy)}{symbol}-{int(now.timestamp())}"
+    payload = (extended.limit_payload(symbol, shares, "buy", limit, coid) if session == AFTER
+               else limit_entry(symbol, shares, limit, coid))
+    intent = TradeIntent(
+        symbol=symbol, action="buy", strategy=strategy, trigger_at=now,
+        entry_price=limit, stop_price=stop, target_price=0.0,
+        shares=shares, risk_dollars=0.0, position_dollars=shares * limit,
+        reward_risk=0.0, paper=True, client_order_id=coid, llm_concern=reason[:300])
+    log("trade_intent", symbol, reason, policy, intent=intent)
+    try:
+        order = await broker.submit(payload)
+    except BrokerError as exc:
+        log("order_rejected", symbol, str(exc), policy, intent=intent)
+        return Bought(symbol=symbol, ok=False, message=f"rejected: {exc}")
+    log("order_submitted", symbol, reason, policy, intent=intent,
+        order_id=str(order.get("id", "")))
+    sizing = Sizing(shares=shares, risk_dollars=0.0, position_dollars=shares * limit,
+                    limited_by="equal slot")
+    return Bought(symbol=symbol, ok=True, sizing=sizing,
+                  message=(f"{shares} sh limit {limit:,.2f}, stop {stop:,.2f} "
+                           f"(equal slot, {shares * limit:,.0f})"))
+
+
 async def price_and_atr(symbol: str, client) -> tuple[float, float]:
     intraday = await fetch_intraday(symbol, client, minutes=30, range_=max_range(30))
     daily = await fetch_bars(symbol, client, range_="6mo")
@@ -73,11 +150,17 @@ async def buy_with_stop(broker, client, symbol: str, *, strategy: str, sleeve: f
     `reward_risk` are Gemma's menu choices; left out, the picks defaults.
     `loss_floor` off keeps the full ATR stop (satellite.wide_stop; the caller
     lowers `risk_pct` so the size shrinks instead)."""
+    quoted = None
+    if session == AFTER:
+        # Missing print: caller retries. Do not write a refusal every five minutes.
+        quoted = await extended.price(symbol, client, session)
+        if quoted is None:
+            return Bought(symbol=symbol, ok=False, message="no fresh after price")
     try:
         last, atr = await price_and_atr(symbol, client)
         if session != REGULAR:
             # Outside regular hours: today's extended-session price, fresh or nothing.
-            live = await extended.price(symbol, client, session)
+            live = quoted if quoted is not None else await extended.price(symbol, client, session)
             if live is None:
                 raise ValueError(f"no fresh {session} price")
             last = live

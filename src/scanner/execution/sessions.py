@@ -20,6 +20,14 @@ REGULAR, PRE, AFTER, OVERNIGHT, CLOSED = "regular", "pre", "after", "overnight",
 EXTENDED = (PRE, AFTER, OVERNIGHT)
 
 
+def accepts_due_orders(session: str) -> bool:
+    """Regular hours, and after-hours (16:00-20:00 ET).
+
+    A buy or a sell that is already due may go out in those two sessions.
+    Premarket and overnight stay closed to those orders."""
+    return session in (REGULAR, AFTER)
+
+
 def session_at(now: datetime, trading_days: Iterable[date]) -> str:
     days = set(trading_days)
     et = now.astimezone(ET)

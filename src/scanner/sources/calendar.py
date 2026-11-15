@@ -152,9 +152,10 @@ async def upcoming_earnings(
     calendar page could not be read — the caller can tell "nothing scheduled"
     from "did not look".
 
-    Nasdaq's earnings calendar answers `date=D` with D-1's reports (same
-    behavior as its economic calendar). Query `D+1` to get `D`'s earnings,
-    then store with the correct `on=D` date.
+    The earnings page is not shifted: `date=D` returns D's reports (checked
+    again 2026-11-02: date=11-03 listed SM after the close, date=11-04 listed
+    APA, date=11-05 listed VTRS and INSW before the open). The economic page
+    is the one that answers with the day before. `EARNINGS_DATE_OFFSET` is 0.
     """
     start = today or date.today()
     found: dict[str, Earnings] = {}
@@ -174,6 +175,45 @@ async def upcoming_earnings(
         for symbol, event in parse_earnings(payload, day, symbols).items():
             found.setdefault(symbol, event)
     return found, tuple(failed)
+
+
+def apply_moomoo(found: dict[str, Earnings], failed: tuple[date, ...],
+                 extra: dict[str, tuple[date, str]], covered: tuple[date, ...],
+                 ) -> tuple[dict[str, Earnings], tuple[date, ...]]:
+    """Keep Nasdaq's row. A day Moomoo actually read leaves the failed list."""
+    merged = dict(found)
+    seen = set(covered)
+    for symbol, (on, when) in extra.items():
+        merged.setdefault(symbol, Earnings(symbol=symbol, on=on, when=when))
+    return merged, tuple(day for day in failed if day not in seen)
+
+
+async def with_moomoo(
+    symbols: frozenset[str],
+    client: httpx.AsyncClient,
+    *,
+    horizon: int = DEFAULT_HORIZON,
+    today: date | None = None,
+    backup=None,
+) -> tuple[dict[str, Earnings], tuple[date, ...]]:
+    """Nasdaq first. Moomoo fills the session days Nasdaq did not return.
+
+    The 10-7 close exit does not call this. A rules-book name opened on or
+    after the book date is not sold because a report date appears.
+    """
+    start = today or date.today()
+    found, failed = await upcoming_earnings(symbols, client, horizon=horizon, today=start)
+    if not failed:
+        return found, failed
+    filler = backup
+    if filler is None:
+        from scanner.sources.moomoo_quote import earnings_backup
+        filler = earnings_backup
+    try:
+        extra, covered = filler(symbols, failed, start)
+    except Exception:
+        return found, failed
+    return apply_moomoo(found, failed, extra, covered)
 
 
 def is_market_moving(event_name: str) -> bool:

@@ -229,7 +229,10 @@ class TradingPolicy(Frozen):
     #: against the sleeve, not the balance — otherwise "1% of equity" quietly
     #: becomes 1.5% of the money the strategy actually has. 100 means the whole
     #: account, which is how this behaved before sleeves existed.
-    swing_allocation_pct: float = 100.0
+    #: 0.0 from 2026-11-10 (operator: take the sweep off new buys). Open sweep positions
+    #: and their stops stay. A new setup is sized against this sleeve, so zero equity
+    #: makes it not tradeable. It was 20.0 from 2026-11-02.
+    swing_allocation_pct: float = 0.0
 
     #: Hard ceiling on the swing sleeve in dollars, or None for no ceiling.
     #: A percentage floats with the account, so profit stays where it was made;
@@ -453,7 +456,9 @@ class TradingPolicy(Frozen):
     #: operator + Gemma 10-23): 50% SPY core, Gemma 40% in 6 equal names, breakout 10%.
     #: From 2026-10-26 the rules book (scripts/rules_pick.py) picks these names, not Gemma.
     #: 30.0 / 5 names from 2026-10-27: 10% to the small-cap book (operator: "from the rules book").
-    gemma_allocation_pct: float = 30.0
+    #: 20.0 from 2026-11-02: 10% to the sweep scanner (operator 2026-11-01). Held names keep their
+    #: stops and exits; the book buys nothing until it is back under its 20%.
+    gemma_allocation_pct: float = 20.0
     gemma_max_positions: int = 5
     #: Risk per Gemma trade, as % of ITS sleeve. 2.0 from 2026-10-07 (operator:
     #: "push Gemma to max out profit"): at 1% with ~10% stops its five positions
@@ -512,7 +517,9 @@ class TradingPolicy(Frozen):
     #: opening volume break the first 15 minutes' high; stop the range low, target 1.5R,
     #: everything sold 10 minutes before the close. Its own 10%, taken from Gemma's share
     #: with her agreement. CHOSEN, not measured: graded forward like every book.
-    orb_allocation_pct: float = 10.0
+    #: 0.0 from 2026-11-02: its 10% to the sweep scanner (operator 2026-11-01; ORB 18 closed, 6 won,
+    #: -$259). The task keeps running so nothing it holds is orphaned; with no sleeve it buys nothing.
+    orb_allocation_pct: float = 0.0
     orb_max_positions: int = 3
     #: Risk per trade as % of the ORB sleeve. The per-name cap (1/3 of the sleeve)
     #: usually binds first: a 1% stop on $3.3k risks ~$33.
@@ -522,8 +529,15 @@ class TradingPolicy(Frozen):
     # --- the SPY core (execution/satellite.py, the plan of 2026-10-23) ------------
     #: Half the account sits in SPY: bought in two halves, topped up below 90% of its
     #: target, never sold by a rule, no stop. Operator + Gemma: "holding does work".
-    core_allocation_pct: float = 50.0
-    core_symbol: str = "SPY"
+    #: 25.0 from 2026-11-02 (operator: "sell SPY!!! i dont want to see that postion"): QQQ
+    #: keeps its 25%; SPY's 25% sits in cash until the operator assigns it.
+    core_allocation_pct: float = 25.0
+    #: Split equally (operator 2026-11-01: "change over to S&P 500 and NASDAQ", a freeze
+    #: exception); SPY dropped 2026-11-02, QQQ alone, with its own stop and re-buy rule.
+    core_symbols: tuple[str, ...] = ("QQQ",)
+    #: A core index held above this multiple of its target is sold down to it (the one-time
+    #: SPY -> SPY + QQQ split; the weekly flatten and two-half re-buy rebalance it after).
+    core_trim_above: float = 1.25
     #: Sold before the close only when losing AND all four signs confirm (execution/preclose.py,
     #: operator 2026-10-31: strict, SPY only). Every other book is scored and reported, not sold.
     preclose_sell_strategies: tuple[str, ...] = ("core",)
@@ -547,9 +561,11 @@ class TradingPolicy(Frozen):
 
     @property
     def own_sleeves_pct(self) -> float:
-        """Equity claimed by the books with their own sleeve."""
+        """Equity claimed by the books with their own sleeve. The sweep counts when its share is
+        under 100, including 0 (new buys off from 2026-11-10)."""
+        swing = self.swing_allocation_pct if self.swing_allocation_pct < 100.0 else 0.0
         return (self.momentum_allocation_pct + self.gemma_allocation_pct + self.orb_allocation_pct
-                + self.core_allocation_pct + self.small_allocation_pct)
+                + self.core_allocation_pct + self.small_allocation_pct + swing)
 
     # --- recorded, never enforced ------------------------------------------
     #: Each of these improved the holdout and none has forward evidence. They

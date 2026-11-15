@@ -55,6 +55,35 @@ async def bars(symbols: Sequence[str], client: httpx.AsyncClient, *, timeframe: 
     return out
 
 
+LATEST_QUOTE = "https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
+
+
+def recent_sip_verdict(status_code: int, body: str = "") -> str:
+    """Whether this account just read a SIP quote.
+
+    'ok' is HTTP 200. 'refused' is the free-plan block on recent SIP. 'unchecked'
+    is any other failure. A deposit waits until this is 'ok'. Paper scans stay
+    on the feed that already works while it is not.
+    """
+    if status_code == 200:
+        return "ok"
+    if status_code == 403 or "recent sip" in body.lower():
+        return "refused"
+    return "unchecked"
+
+
+async def latest_quote_status(symbol: str, client: httpx.AsyncClient, *,
+                               feed: str = "sip") -> tuple[int, str]:
+    """HTTP status and a short body for one latest quote. Read-only. Does not raise."""
+    try:
+        response = await client.get(
+            LATEST_QUOTE.format(symbol=symbol), headers=_headers(),
+            params={"feed": feed}, timeout=20.0)
+    except httpx.HTTPError as exc:
+        return 0, str(exc)
+    return response.status_code, response.text[:400]
+
+
 SNAPSHOTS = "https://data.alpaca.markets/v2/stocks/snapshots"
 
 

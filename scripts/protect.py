@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
@@ -56,6 +57,14 @@ BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 GREEN, RED, YELLOW, CYAN = "\033[32m", "\033[31m", "\033[33m", "\033[36m"
 
 
+
+
+def _note_gone() -> bool:
+    """True when every old protection note is gone. A locked file stays."""
+    stuck = protection.clear_alert((Path.home() / "Desktop", Path("logs")))
+    for line in stuck:
+        print(f"{YELLOW}could not remove protection note: {line}{RESET}")
+    return not stuck
 
 
 def write_alert(rows) -> None:
@@ -79,16 +88,16 @@ async def main(submit: bool) -> None:
         # had none, so arming one would trade a strategy nobody tested.
         stopless = TradingPolicy().stopless_strategies
         if naked and stopless:
-            owner_map = ownership.owners(await broker._get(
-                "/v2/orders", status="all", limit=500, nested="true"))
+            history = await broker._get("/v2/orders", status="all", limit=500, nested="true")
+            owner_map = ownership.owners(history)
             skipped = [p.symbol for p in naked
                        if ownership.owner(p.symbol, owner_map) in stopless]
             if skipped:
-                print(f"{DIM}no stop by design ({'/'.join(stopless)}): "
-                      f"{', '.join(skipped)}{RESET}")
+                print(f"{DIM}no stop by design ({'/'.join(stopless)}): {', '.join(skipped)}{RESET}")
             naked = tuple(p for p in naked if p.symbol not in skipped)
         if not naked:
-            print(f"{GREEN}every open position has a live stop.{RESET}")
+            if _note_gone():
+                print(f"{GREEN}every open position has a live stop.{RESET}")
             return
 
         levels = submitted_levels(settings.audit_log_path)
@@ -103,37 +112,38 @@ async def main(submit: bool) -> None:
         armable: list[tuple[str, int, float, float]] = []
         to_close: list[tuple[str, int, str]] = []
         alerts: list[tuple[str, int, str, str]] = []
+        leaving: set[str] = set()
         for position in naked:
             symbol, qty = position.symbol, position.qty
             stop, target = levels.get(symbol, (None, None))
             last = quotes.get(symbol, 0.0)
             decision = protection.decide(last=last, stop=stop, target=target)
+            exposed = protection.uncovered(qty, closing.get(symbol, 0))
+            if exposed <= 0:
+                print(f"  {YELLOW}{symbol:<6} a market sell is already working{RESET}")
+                leaving.add(symbol)
+                continue
             if decision == "unknown":
                 print(f"  {RED}{symbol:<6} no submission in the audit log — "
                       f"cannot recover its stop; close or set one by hand{RESET}")
-                alerts.append((symbol, qty, decision, "no stop on record -- act by hand"))
+                alerts.append((symbol, exposed, decision, "no stop on record -- act by hand"))
                 continue
             # A stop already below the market cannot be re-armed honestly, so
             # the exit it called for is taken now instead of left for a human.
             if decision in ("close_stop", "close_target"):
                 edge, level = (("stop", stop) if decision == "close_stop"
                                else ("target", target))
-                naked_qty = qty - closing.get(symbol, 0)
-                if naked_qty <= 0:
-                    print(f"  {YELLOW}{symbol:<6} past its {edge} {level:,.2f}; "
-                          f"a market sell is already working{RESET}")
-                    continue
                 print(f"  {RED}{symbol:<6} last {last:,.2f} is past its {edge} "
-                      f"{level:,.2f} — exit called: sell {naked_qty} at market{RESET}")
-                to_close.append((symbol, naked_qty, decision))
+                      f"{level:,.2f} — exit called: sell {exposed} at market{RESET}")
+                to_close.append((symbol, exposed, decision))
                 continue
 
             room = (last - stop) / last * 100 if last else 0.0
-            print(f"  {BOLD}{symbol:<6}{RESET} {qty:>6} sh   "
+            print(f"  {BOLD}{symbol:<6}{RESET} {exposed:>6} sh   "
                   f"stop {RED}{stop:>9,.2f}{RESET}   "
                   f"target {GREEN}{target:>9,.2f}{RESET}   "
                   f"{DIM}last {last:,.2f}, {room:.2f}% above stop{RESET}")
-            armable.append((symbol, qty, stop, target))
+            armable.append((symbol, exposed, stop, target))
 
         if not submit:
             print(f"\n{YELLOW}report only — nothing sent. "
@@ -150,6 +160,7 @@ async def main(submit: bool) -> None:
                     stage="trade", reason=f"{decision}: market sell {qty} sh, no live stop",
                 ))
                 alerts.append((symbol, qty, decision, f"market sell sent, id {order.get('id', '?')}"))
+                leaving.add(symbol)
                 print(f"  {YELLOW}sold{RESET}  {symbol:<6} {qty} sh at market "
                       f"{DIM}id {order.get('id', '?')}{RESET}")
             except BrokerError as exc:
@@ -188,10 +199,15 @@ async def main(submit: bool) -> None:
             write_alert(alerts)
 
         remaining = await broker.unprotected_positions()
-        if remaining:
+        still = [p for p in remaining if p.symbol not in leaving]
+        if still:
             print(f"\n{RED}{BOLD}still unprotected: "
-                  f"{', '.join(p.symbol for p in remaining)}{RESET}")
-        else:
+                  f"{', '.join(p.symbol for p in still)}{RESET}")
+        elif alerts:
+            # The note just written is the record of this pass. A later clean
+            # pass removes it. Deleting it here hid the 2026-10-05 style exit.
+            print(f"\n{YELLOW}protection note written; it stays until the book is covered.{RESET}")
+        elif _note_gone():
             print(f"\n{GREEN}{BOLD}every open position now has a live stop.{RESET}")
 
 
